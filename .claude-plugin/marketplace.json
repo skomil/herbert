@@ -1,0 +1,13 @@
+{
+  "name": "herbert",
+  "owner": {
+    "name": "herbert"
+  },
+  "plugins": [
+    {
+      "name": "herbert",
+      "source": "./",
+      "description": "Local analytics dashboard, spec/correction logging, and session retros for Claude Code"
+    }
+  ]
+}

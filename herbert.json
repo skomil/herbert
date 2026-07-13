@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "summary": "# herbert\nLocal per-session analytics for Claude Code: an OTel-fed dashboard, spec/correction logging with evolving classification, session retros, windowed usage reports, and a living PRD per component.",
+  "components": {
+    "reports": "- Windows follow the configured report window (daily/weekly, anchored hour + offset)\n- CSV export per window, only when the window has data\n- Plan cost comparison against standard API pricing"
+  }
+}
