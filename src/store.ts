@@ -303,6 +303,42 @@ export class Store {
     return { summary: this.prdDocs.get('') ?? null, components };
   }
 
+  /** A specification with its dashboard feedback and evolving annotations merged in. */
+  private annotated(e: SummaryEvent): SummaryEvent {
+    const f = this.specFeedback.get(e.t);
+    const a = this.specAnnotations.get(e.t);
+    if (!f && !a) return e;
+    const out = { ...e };
+    if (f) out.feedback = f;
+    if (a?.context) out.context = a.context; // evolved classification wins over logged context
+    if (a?.deps) out.deps = a.deps;
+    if (a?.status) out.status = a.status;
+    if (a?.summary) out.summary = a.summary; // proposed specs are editable in place
+    if (a?.revision) out.revision = a.revision;
+    return out;
+  }
+
+  /** All live specifications (annotations applied, soft-deleted excluded), for export. */
+  specs(): SummaryEvent[] {
+    return this.events
+      .filter((e) => e.type === 'specification' && this.specAnnotations.get(e.t)?.deleted !== true)
+      .map((e) => this.annotated(e));
+  }
+
+  /** Add a specification shared via herbert.json; skips (returns false) if one already exists at its timestamp. */
+  importSpec(s: { t?: unknown; summary?: unknown; context?: unknown; deps?: unknown; status?: unknown }): boolean {
+    if (typeof s?.t !== 'number' || typeof s.summary !== 'string') return false;
+    if (this.events.some((e) => e.type === 'specification' && e.t === s.t)) return false;
+    const event: SummaryEvent = { type: 'specification', sessionId: null, summary: s.summary, t: s.t };
+    if (typeof s.context === 'string' && s.context) event.context = s.context;
+    this.addEvent(event);
+    const deps = Array.isArray(s.deps) ? s.deps.filter((d): d is string => typeof d === 'string') : undefined;
+    const status = s.status === 'proposed' ? 'proposed' : undefined;
+    // status/deps live in annotations so imported proposed specs stay editable in the receiving clone
+    if (deps?.length || status) this.annotateSpec(s.t, { deps: deps ?? null, status: status ?? null });
+    return true;
+  }
+
   /** Set (or clear, with null) the feedback on the specification logged at specT. */
   setSpecFeedback(specT: number, feedback: SpecFeedback | null): boolean {
     if (!this.events.some((e) => e.type === 'specification' && e.t === specT)) return false;
@@ -578,27 +614,13 @@ export class Store {
     );
 
     const wantEvent = (e: SummaryEvent) => inRange(e.t) && wantSid(e.sessionId ?? 'unknown');
-    const withFeedback = (e: SummaryEvent): SummaryEvent => {
-      const f = this.specFeedback.get(e.t);
-      const a = this.specAnnotations.get(e.t);
-      if (!f && !a) return e;
-      const out = { ...e };
-      if (f) out.feedback = f;
-      if (a?.context) out.context = a.context; // evolved classification wins over logged context
-      if (a?.deps) out.deps = a.deps;
-      if (a?.status) out.status = a.status;
-      if (a?.summary) out.summary = a.summary; // proposed specs are editable in place
-      if (a?.revision) out.revision = a.revision;
-      return out;
-    };
-
     const isDeleted = (e: SummaryEvent) =>
       e.type === 'specification' && this.specAnnotations.get(e.t)?.deleted === true;
 
     for (const e of this.events) {
       if (!e.sessionId || !wantEvent(e) || isDeleted(e)) continue;
       const s = get(e.sessionId);
-      if (e.type === 'specification') s.specifications.push(withFeedback(e));
+      if (e.type === 'specification') s.specifications.push(this.annotated(e));
       else if (e.type === 'correction') s.corrections.push(e);
       else if (e.type === 'retro') s.retros.push(e);
     }
@@ -611,7 +633,7 @@ export class Store {
       totals,
       specifications: this.events
         .filter((e) => e.type === 'specification' && wantEvent(e) && !isDeleted(e))
-        .map(withFeedback),
+        .map((e) => this.annotated(e)),
       corrections: this.events.filter((e) => e.type === 'correction' && wantEvent(e)),
       retros: this.events.filter((e) => e.type === 'retro' && wantEvent(e)),
       recentEvents: recentEvents.reverse(),

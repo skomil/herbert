@@ -2,7 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 /** Port the shared herbert server listens on (dashboard + OTLP receiver + REST API). */
 export const DEFAULT_PORT = 16300;
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 /** Hard cap on spec/correction/retro summaries, per product requirement. */
 export const MAX_SUMMARY_CHARS = 599;
 export function port() {

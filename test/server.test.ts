@@ -279,6 +279,7 @@ describe('server', () => {
     const file: any = await res.json();
     expect(file.version).toBe(1);
     expect(file.components.mcp).toBe('- six tools');
+    expect(Array.isArray(file.specifications)).toBe(true);
 
     // replace mode overwrites; fill mode only adds missing docs
     file.components.mcp = '- rewritten';
@@ -299,6 +300,47 @@ describe('server', () => {
 
     const bad = await fetch(url('/api/prd/import'), { method: 'POST', body: JSON.stringify({ components: { x: 7 } }) });
     expect(bad.status).toBe(400);
+  });
+
+  it('exports full specs (proposed included) and re-imports them without duplicating', async () => {
+    const impl: any = await (await fetch(url('/api/events'), {
+      method: 'POST',
+      body: JSON.stringify({ type: 'specification', sessionId: 'sess-x', summary: 'Shipped rule', context: 'server' }),
+    })).json();
+    const prop: any = await (await fetch(url('/api/events'), {
+      method: 'POST',
+      body: JSON.stringify({ type: 'specification', summary: 'Draft rule', status: 'proposed' }),
+    })).json();
+
+    const file: any = await (await fetch(url('/api/prd/export'))).json();
+    const exported = file.specifications.filter((s: any) => s.t === impl.event.t || s.t === prop.event.t);
+    expect(exported).toHaveLength(2);
+    expect(exported.find((s: any) => s.t === impl.event.t).context).toBe('server');
+    expect(exported.find((s: any) => s.t === prop.event.t).status).toBe('proposed');
+
+    // re-importing into the same store adds nothing (deduped by timestamp)
+    let imp: any = await (await fetch(url('/api/prd/import'), { method: 'POST', body: JSON.stringify(file) })).json();
+    expect(imp.importedSpecs).toBe(0);
+
+    // a spec from another repo (fresh timestamp) is added, with its proposed status preserved and editable
+    const fresh = { t: 1234567890, summary: 'From a clone', context: 'mcp', status: 'proposed' };
+    imp = await (await fetch(url('/api/prd/import'), {
+      method: 'POST',
+      body: JSON.stringify({ specifications: [fresh] }),
+    })).json();
+    expect(imp.importedSpecs).toBe(1);
+    const summary: any = await (await fetch(url('/api/summary'))).json();
+    const landed = summary.specifications.find((e: any) => e.t === fresh.t);
+    expect(landed.status).toBe('proposed');
+    expect(landed.context).toBe('mcp');
+    const edit = await fetch(url('/api/specs/annotate'), {
+      method: 'POST',
+      body: JSON.stringify({ spec: fresh.t, summary: 'Edited after import' }),
+    });
+    expect(edit.status).toBe(200); // proposed → editable in the receiving clone
+
+    const badSpecs = await fetch(url('/api/prd/import'), { method: 'POST', body: JSON.stringify({ specifications: {} }) });
+    expect(badSpecs.status).toBe(400);
   });
 
   it('saves and serves PRD docs', async () => {

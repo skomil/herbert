@@ -105,6 +105,14 @@ export function startServer(p = port(), dir = dataDir()) {
                         version: 1,
                         summary: prd.summary?.md ?? null,
                         components: Object.fromEntries(Object.entries(prd.components).map(([k, v]) => [k, v.md])),
+                        // full specs (proposed included) travel with the repo so a clone starts with the spec map
+                        specifications: store.specs().map((s) => ({
+                            t: s.t,
+                            summary: s.summary,
+                            ...(s.context ? { context: s.context } : {}),
+                            ...(s.deps?.length ? { deps: s.deps } : {}),
+                            ...(s.status ? { status: s.status } : {}),
+                        })),
                     };
                     res.writeHead(200, {
                         'content-type': 'application/json',
@@ -143,7 +151,17 @@ export function startServer(p = port(), dir = dataDir()) {
                         store.setPrdDoc(k, v);
                         imported++;
                     }
-                    return json(res, 200, { ok: true, imported });
+                    // specs are keyed by timestamp and always deduped, regardless of mode — never duplicated
+                    let importedSpecs = 0;
+                    if (body.specifications !== undefined) {
+                        if (!Array.isArray(body.specifications)) {
+                            return json(res, 400, { error: 'specifications must be an array' });
+                        }
+                        for (const s of body.specifications)
+                            if (store.importSpec(s))
+                                importedSpecs++;
+                    }
+                    return json(res, 200, { ok: true, imported, importedSpecs });
                 }
                 case 'GET /api/report-window': {
                     const config = store.reportWindow();
