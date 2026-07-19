@@ -324,15 +324,15 @@ describe('Store', () => {
     const dir = tmpDir();
     const store = new Store(dir);
     store.addEvent({ type: 'specification', sessionId: 's1', summary: 'spec A', t: 1000 });
-    // logged specs start complete (no status)
-    expect(store.summary().specifications[0].status).toBeUndefined();
+    // a logged spec with no stored status always reports 'complete'
+    expect(store.summary().specifications[0].status).toBe('complete');
     expect(store.annotateSpec(1000, { status: 'ready' })).toBe(true);
     expect(store.summary().specifications[0].status).toBe('ready');
     store.annotateSpec(1000, { status: 'in_progress' });
     expect(store.summary().specifications[0].status).toBe('in_progress');
-    // dragging to Complete clears the status, and that survives a reload
+    // clearing the stored status marks the spec complete, and that survives a reload
     store.annotateSpec(1000, { status: null });
-    expect(new Store(dir).summary().specifications[0].status).toBeUndefined();
+    expect(new Store(dir).summary().specifications[0].status).toBe('complete');
   });
 
   it('preserves an extended status across herbert.json import', () => {
@@ -341,7 +341,19 @@ describe('Store', () => {
     expect(store.importSpec({ t: 6, summary: 'bogus status', status: 'nonsense' })).toBe(true);
     const specs = store.summary().specifications;
     expect(specs.find((e) => e.t === 5)!.status).toBe('ready');
-    expect(specs.find((e) => e.t === 6)!.status).toBeUndefined(); // unknown status dropped
+    expect(specs.find((e) => e.t === 6)!.status).toBe('complete'); // unknown status dropped -> complete
+  });
+
+  it('always reports an explicit status, with complete as a first-class value', () => {
+    const store = new Store(tmpDir());
+    store.addEvent({ type: 'specification', sessionId: 's1', summary: 'spec X', t: 2000 });
+    // a spec is never statusless on the board
+    expect(store.summary().specifications[0].status).toBe('complete');
+    store.annotateSpec(2000, { status: 'in_progress' });
+    expect(store.summary().specifications[0].status).toBe('in_progress');
+    // 'complete' is settable, not merely the absence of a status
+    store.annotateSpec(2000, { status: 'complete' });
+    expect(store.summary().specifications[0].status).toBe('complete');
   });
 
   it('annotates specs with an evolving component and deps', () => {

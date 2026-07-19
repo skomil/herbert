@@ -1,6 +1,6 @@
 {
   "name": "herbert",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Claude Code plugin: local analytics dashboard, spec/correction logging, and session retros",
   "license": "MIT",
   "private": true,

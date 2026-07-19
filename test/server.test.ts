@@ -244,7 +244,7 @@ describe('server', () => {
     });
     spec = (await (await fetch(url('/api/summary'))).json())
       .specifications.find((e: any) => e.t === t);
-    expect(spec.status).toBeUndefined();
+    expect(spec.status).toBe('complete');
     expect(spec.revision).toBeUndefined();
     expect(spec.summary).toBe('Windows are weekly — Revised: also support monthly');
   });
@@ -263,7 +263,7 @@ describe('server', () => {
       body: JSON.stringify({ spec: t, status: '' }),
     });
     summary = await (await fetch(url('/api/summary'))).json();
-    expect(summary.specifications.find((e: any) => e.t === t).status).toBeUndefined();
+    expect(summary.specifications.find((e: any) => e.t === t).status).toBe('complete');
 
     const bad = await fetch(url('/api/events'), {
       method: 'POST',
@@ -272,7 +272,7 @@ describe('server', () => {
     expect(bad.status).toBe(400);
   });
 
-  it('moves a spec across kanban statuses and clears it on drop into Complete', async () => {
+  it('moves a spec across kanban statuses and completes it on drop into Complete', async () => {
     const created: any = await (await fetch(url('/api/events'), {
       method: 'POST',
       body: JSON.stringify({ type: 'specification', sessionId: 'sess-1', summary: 'Board me' }),
@@ -281,7 +281,7 @@ describe('server', () => {
     const statusOf = async () =>
       (await (await fetch(url('/api/summary'))).json()).specifications.find((e: any) => e.t === t).status;
 
-    for (const status of ['proposed', 'ready', 'in_progress']) {
+    for (const status of ['proposed', 'ready', 'in_progress', 'complete']) {
       const res = await fetch(url('/api/specs/annotate'), {
         method: 'POST',
         body: JSON.stringify({ spec: t, status }),
@@ -289,9 +289,9 @@ describe('server', () => {
       expect(res.status).toBe(200);
       expect(await statusOf()).toBe(status);
     }
-    // dragging into Complete clears the status (empty string = implemented)
+    // the legacy empty-string signal still resolves to complete (never statusless)
     await fetch(url('/api/specs/annotate'), { method: 'POST', body: JSON.stringify({ spec: t, status: '' }) });
-    expect(await statusOf()).toBeUndefined();
+    expect(await statusOf()).toBe('complete');
 
     // an unknown status is rejected
     const bad = await fetch(url('/api/specs/annotate'), {

@@ -119,7 +119,7 @@ export function startServer(p = port(), dir = dataDir()) {
                             summary: s.summary,
                             ...(s.context ? { context: s.context } : {}),
                             ...(s.deps?.length ? { deps: s.deps } : {}),
-                            ...(s.status ? { status: s.status } : {}),
+                            ...(s.status && s.status !== 'complete' ? { status: s.status } : {}),
                         })),
                     };
                     res.writeHead(200, {
@@ -330,13 +330,14 @@ export function startServer(p = port(), dir = dataDir()) {
                     if (body.status !== undefined) {
                         if (body.status !== '' && body.status !== null && !SPEC_STATUSES.includes(body.status)) {
                             return json(res, 400, {
-                                error: `status must be one of: ${SPEC_STATUSES.join(', ')} (or empty to mark implemented)`,
+                                error: `status must be one of: ${SPEC_STATUSES.join(', ')}`,
                             });
                         }
-                        ann.status = body.status || null;
+                        // '' / null are legacy "mark implemented" signals; every completion resolves to 'complete'
+                        ann.status = body.status && body.status !== 'complete' ? body.status : 'complete';
                     }
-                    // implementing a spec with a pending revision folds the revision into the summary
-                    if (ann.status === null && body.status !== undefined) {
+                    // completing a spec with a pending revision folds the revision into the summary
+                    if (ann.status === 'complete' && body.status !== undefined) {
                         const pending = store.specRevision(body.spec);
                         if (pending) {
                             const base = store.specEffectiveSummary(body.spec) ?? '';

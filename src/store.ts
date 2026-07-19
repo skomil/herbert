@@ -16,12 +16,13 @@ export const SPEC_FEEDBACK = [
 export type SpecFeedback = (typeof SPEC_FEEDBACK)[number];
 
 /**
- * A spec's position in the implementation lifecycle. An *absent* status means
- * the spec is implemented/complete; these three are the active (not-yet-done)
- * states shown as Kanban columns. 'proposed' also marks a user-added spec that
- * was never implemented, and is what a revision reopens a spec to.
+ * A spec's position in the implementation lifecycle, shown as Kanban columns.
+ * Every spec always carries exactly one of these: 'complete' means implemented
+ * (legacy data with no stored status is normalized to 'complete' on read).
+ * 'proposed' also marks a user-added spec that was never implemented, and is
+ * what a revision reopens a spec to.
  */
-export const SPEC_STATUSES = ['proposed', 'ready', 'in_progress'] as const;
+export const SPEC_STATUSES = ['proposed', 'ready', 'in_progress', 'complete'] as const;
 export type SpecStatus = (typeof SPEC_STATUSES)[number];
 
 export interface SummaryEvent {
@@ -40,7 +41,7 @@ export interface SummaryEvent {
   context?: string;
   /** components this specification depends on (dashboard-set, specifications only) */
   deps?: string[];
-  /** active lifecycle state; absent = implemented/complete (dashboard-set, specifications only) */
+  /** lifecycle state; always set on specs in summaries ('complete' = implemented) (dashboard-set) */
   status?: SpecStatus;
   /** pending revision comment; reopens the spec until re-implemented (specifications only) */
   revision?: string;
@@ -376,12 +377,11 @@ export class Store {
   private annotated(e: SummaryEvent): SummaryEvent {
     const f = this.specFeedback.get(e.t);
     const a = this.specAnnotations.get(e.t);
-    if (!f && !a) return e;
-    const out = { ...e };
+    // Every spec always reports an explicit status; no stored status = complete.
+    const out: SummaryEvent = { ...e, status: a?.status ?? 'complete' };
     if (f) out.feedback = f;
     if (a?.context) out.context = a.context; // evolved classification wins over logged context
     if (a?.deps) out.deps = a.deps;
-    if (a?.status) out.status = a.status;
     if (a?.summary) out.summary = a.summary; // proposed specs are editable in place
     if (a?.revision) out.revision = a.revision;
     return out;

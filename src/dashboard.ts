@@ -254,7 +254,7 @@ document.addEventListener('click', (e) => {
   if (impl) {
     fetch(new URL('api/specs/annotate', document.baseURI), {
       method: 'POST',
-      body: JSON.stringify({ spec: Number(impl.dataset.impl), status: '' }),
+      body: JSON.stringify({ spec: Number(impl.dataset.impl), status: 'complete' }),
     }).then(refresh);
     return;
   }
@@ -358,7 +358,7 @@ document.addEventListener('change', (e) => {
 });
 
 // Kanban drag-and-drop: cards carry data-kcard=<spec t>, columns carry data-lane=<status>
-// (empty for Complete). Delegated so the handlers survive the 5s re-render.
+// ('complete' for the Complete column). Delegated so the handlers survive the 5s re-render.
 let DRAG_SPEC = null;
 document.addEventListener('dragstart', (e) => {
   const card = e.target.closest('[data-kcard]');
@@ -392,7 +392,7 @@ document.addEventListener('drop', (e) => {
   const spec = DRAG_SPEC || e.dataTransfer.getData('text/plain');
   DRAG_SPEC = null;
   if (!spec) return;
-  // empty lane = Complete: clearing the status marks the spec implemented
+  // the target lane's key is the new status ('complete' for the Complete column)
   fetch(new URL('api/specs/annotate', document.baseURI), {
     method: 'POST',
     body: JSON.stringify({ spec: Number(spec), status: col.dataset.lane }),
@@ -978,7 +978,7 @@ const KANBAN_LANES = [
   { key: 'proposed', label: 'Proposed' },
   { key: 'ready', label: 'Ready to pick up' },
   { key: 'in_progress', label: 'In progress' },
-  { key: '', label: 'Complete' },
+  { key: 'complete', label: 'Complete' },
 ];
 
 function kanbanCard(e) {
@@ -994,9 +994,9 @@ function kanbanCard(e) {
 function renderKanban(d, sid, s) {
   const specs = d.specifications;
   const cwd = (d.sessions.find((x) => x.sessionId === sid) || {}).cwd || '';
-  const lanes = KANBAN_LANES.filter((l) => !(s.khide === '1' && l.key === ''));
+  const lanes = KANBAN_LANES.filter((l) => !(s.khide === '1' && l.key === 'complete'));
   const board = lanes.map((l) => {
-    const items = specs.filter((e) => (e.status || '') === l.key);
+    const items = specs.filter((e) => (e.status || 'complete') === l.key);
     // the Proposed column carries an "add" form; new specs are tied to this session + repo
     const add = l.key === 'proposed' ? proposeForm(null, { session: sid, cwd }) : '';
     return '<div class="kcol" data-lane="' + l.key + '">' +
