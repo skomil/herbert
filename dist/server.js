@@ -4,7 +4,7 @@ import { MAX_SUMMARY_CHARS, VERSION, dataDir, host, port } from './config.js';
 import { dashboardHtml } from './dashboard.js';
 import { isHerbertUp } from './ensure.js';
 import { parseLogs, parseMetrics } from './otlp.js';
-import { SPEC_FEEDBACK, Store, reportWindows, validateSummary, } from './store.js';
+import { SPEC_FEEDBACK, SPEC_STATUSES, Store, reportWindows, validateSummary, } from './store.js';
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 const EVENT_TYPES = ['specification', 'correction', 'retro'];
 const MAX_PRD_CHARS = 50_000;
@@ -85,10 +85,16 @@ export function startServer(p = port(), dir = dataDir()) {
                         sessionId: url.searchParams.get('session') ?? undefined,
                     }));
                 }
-                case 'GET /api/prd':
-                    return json(res, 200, store.prd());
+                case 'GET /api/prd': {
+                    const repo = url.searchParams.get('repo') ?? '';
+                    return json(res, 200, { ...store.prd(repo), repos: store.prdRepos() });
+                }
                 case 'POST /api/prd': {
                     const body = JSON.parse(await readBody(req));
+                    const repo = body.repo ?? '';
+                    if (typeof repo !== 'string') {
+                        return json(res, 400, { error: 'repo must be a string (empty for the unassigned bucket)' });
+                    }
                     const component = body.component ?? '';
                     if (typeof component !== 'string' || component.length > MAX_SUMMARY_CHARS) {
                         return json(res, 400, { error: 'component must be a string (empty for the product summary)' });
@@ -96,17 +102,19 @@ export function startServer(p = port(), dir = dataDir()) {
                     if (typeof body.md !== 'string' || body.md.length > MAX_PRD_CHARS) {
                         return json(res, 400, { error: `md must be a markdown string under ${MAX_PRD_CHARS + 1} characters` });
                     }
-                    store.setPrdDoc(component, body.md);
+                    store.setPrdDoc(repo, component, body.md);
                     return json(res, 200, { ok: true });
                 }
                 case 'GET /api/prd/export': {
-                    const prd = store.prd();
+                    // export is per-repo: a herbert.json travels with one repo, not the whole machine
+                    const repo = url.searchParams.get('repo') ?? '';
+                    const prd = store.prd(repo);
                     const out = {
                         version: 1,
                         summary: prd.summary?.md ?? null,
                         components: Object.fromEntries(Object.entries(prd.components).map(([k, v]) => [k, v.md])),
                         // full specs (proposed included) travel with the repo so a clone starts with the spec map
-                        specifications: store.specs().map((s) => ({
+                        specifications: store.specs(repo).map((s) => ({
                             t: s.t,
                             summary: s.summary,
                             ...(s.context ? { context: s.context } : {}),
@@ -123,6 +131,8 @@ export function startServer(p = port(), dir = dataDir()) {
                 case 'POST /api/prd/import': {
                     const body = JSON.parse(await readBody(req));
                     const fill = body.mode === 'fill'; // fill = only add docs that don't exist locally
+                    // imported PRD content is filed under the target repo (empty = unassigned bucket)
+                    const repo = typeof body.repo === 'string' ? body.repo : '';
                     const docs = [];
                     if (body.summary !== undefined && body.summary !== null) {
                         if (typeof body.summary !== 'string')
@@ -139,7 +149,7 @@ export function startServer(p = port(), dir = dataDir()) {
                             docs.push([k, v]);
                         }
                     }
-                    const existing = store.prd();
+                    const existing = store.prd(repo);
                     const has = (k) => (k === '' ? !!existing.summary : k in existing.components);
                     let imported = 0;
                     for (const [k, v] of docs) {
@@ -148,7 +158,7 @@ export function startServer(p = port(), dir = dataDir()) {
                         }
                         if (fill && has(k))
                             continue;
-                        store.setPrdDoc(k, v);
+                        store.setPrdDoc(repo, k, v);
                         imported++;
                     }
                     // specs are keyed by timestamp and always deduped, regardless of mode — never duplicated
@@ -158,7 +168,7 @@ export function startServer(p = port(), dir = dataDir()) {
                             return json(res, 400, { error: 'specifications must be an array' });
                         }
                         for (const s of body.specifications)
-                            if (store.importSpec(s))
+                            if (store.importSpec(s, repo))
                                 importedSpecs++;
                     }
                     return json(res, 200, { ok: true, imported, importedSpecs });
@@ -318,8 +328,10 @@ export function startServer(p = port(), dir = dataDir()) {
                     if (body.deleted !== undefined)
                         ann.deleted = body.deleted === true;
                     if (body.status !== undefined) {
-                        if (body.status !== 'proposed' && body.status !== '' && body.status !== null) {
-                            return json(res, 400, { error: "status must be 'proposed', or empty to mark implemented" });
+                        if (body.status !== '' && body.status !== null && !SPEC_STATUSES.includes(body.status)) {
+                            return json(res, 400, {
+                                error: `status must be one of: ${SPEC_STATUSES.join(', ')} (or empty to mark implemented)`,
+                            });
                         }
                         ann.status = body.status || null;
                     }
@@ -358,6 +370,21 @@ export function startServer(p = port(), dir = dataDir()) {
                         return json(res, 400, { error: 'sessionId is required' });
                     }
                     store.upsertSession(body);
+                    return json(res, 200, { ok: true });
+                }
+                case 'POST /api/preview': {
+                    const body = JSON.parse(await readBody(req));
+                    if (typeof body.sessionId !== 'string' || !body.sessionId) {
+                        return json(res, 400, { error: 'sessionId is required' });
+                    }
+                    const raw = typeof body.url === 'string' ? body.url.trim() : '';
+                    // http(s) only: the URL is rendered as an href, so reject javascript:/data: etc.
+                    if (raw && !/^https?:\/\//i.test(raw)) {
+                        return json(res, 400, { error: 'url must be an http(s) URL, or empty to clear' });
+                    }
+                    if (raw.length > 2048)
+                        return json(res, 400, { error: 'url is too long' });
+                    store.setPreviewUrl(body.sessionId, raw);
                     return json(res, 200, { ok: true });
                 }
                 default:

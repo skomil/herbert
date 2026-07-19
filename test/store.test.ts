@@ -157,6 +157,31 @@ describe('Store', () => {
     expect(s.toolCalls).toEqual({ Bash: { count: 2, errors: 1 }, Read: { count: 1, errors: 0 } });
   });
 
+  it('records sub-agent runs from subagent_completed events, scoped to the session', () => {
+    const store = new Store(tmpDir());
+    const subagent = (attrs: Record<string, string>, t: number, sid = 's1'): EventRecord => ({
+      kind: 'event',
+      t,
+      name: 'subagent_completed',
+      attrs: { 'session.id': sid, ...attrs },
+    });
+    store.addOtel([
+      subagent({ agent_type: 'Explore', total_tokens: '32423', total_tool_uses: '7', duration_ms: '47332', model: 'claude-opus-4-8' }, 1000),
+      subagent({ agent_type: 'general-purpose', total_tokens: '5000', total_tool_uses: '3', duration_ms: '9000' }, 2000),
+      subagent({ agent_type: 'Explore', total_tokens: '1000', total_tool_uses: '1', duration_ms: '2000' }, 3000, 's2'),
+    ]);
+    const s1 = store.summary().sessions.find((x) => x.sessionId === 's1')!;
+    // sorted by tokens desc in the store? No — order of arrival; assert by content
+    expect(s1.agents).toHaveLength(2);
+    const explore = s1.agents.find((a) => a.type === 'Explore')!;
+    expect(explore).toEqual({ type: 'Explore', tokens: 32423, toolUses: 7, durationMs: 47332, model: 'claude-opus-4-8' });
+    expect(s1.agents.find((a) => a.type === 'general-purpose')!.model).toBeUndefined();
+    // the s2 run stays with s2, not s1
+    expect(store.summary().sessions.find((x) => x.sessionId === 's2')!.agents).toHaveLength(1);
+    // agent runs honor the date-range filter (both s1 runs are before 2500)
+    expect(store.summary({ from: 2500 }).sessions.find((x) => x.sessionId === 's1')?.agents ?? []).toHaveLength(0);
+  });
+
   it('nests logged entries under their session', () => {
     const store = new Store(tmpDir());
     store.upsertSession({ sessionId: 's1', startedAt: 500 });
@@ -295,6 +320,30 @@ describe('Store', () => {
     expect(store.hasDataBetween(6000, 8000)).toBe(false);
   });
 
+  it('tracks the extended spec status lifecycle and clears back to complete', () => {
+    const dir = tmpDir();
+    const store = new Store(dir);
+    store.addEvent({ type: 'specification', sessionId: 's1', summary: 'spec A', t: 1000 });
+    // logged specs start complete (no status)
+    expect(store.summary().specifications[0].status).toBeUndefined();
+    expect(store.annotateSpec(1000, { status: 'ready' })).toBe(true);
+    expect(store.summary().specifications[0].status).toBe('ready');
+    store.annotateSpec(1000, { status: 'in_progress' });
+    expect(store.summary().specifications[0].status).toBe('in_progress');
+    // dragging to Complete clears the status, and that survives a reload
+    store.annotateSpec(1000, { status: null });
+    expect(new Store(dir).summary().specifications[0].status).toBeUndefined();
+  });
+
+  it('preserves an extended status across herbert.json import', () => {
+    const store = new Store(tmpDir());
+    expect(store.importSpec({ t: 5, summary: 'ready spec', status: 'ready' })).toBe(true);
+    expect(store.importSpec({ t: 6, summary: 'bogus status', status: 'nonsense' })).toBe(true);
+    const specs = store.summary().specifications;
+    expect(specs.find((e) => e.t === 5)!.status).toBe('ready');
+    expect(specs.find((e) => e.t === 6)!.status).toBeUndefined(); // unknown status dropped
+  });
+
   it('annotates specs with an evolving component and deps', () => {
     const dir = tmpDir();
     const store = new Store(dir);
@@ -336,14 +385,70 @@ describe('Store', () => {
   it('stores PRD docs per component, empty markdown deletes, persists across reload', () => {
     const dir = tmpDir();
     const store = new Store(dir);
-    store.setPrdDoc('', '# Herbert\nLocal analytics.');
-    store.setPrdDoc('dashboard', '- must work behind a proxy');
-    store.setPrdDoc('reports', 'draft');
-    store.setPrdDoc('reports', ''); // delete
+    store.setPrdDoc('', '', '# Herbert\nLocal analytics.');
+    store.setPrdDoc('', 'dashboard', '- must work behind a proxy');
+    store.setPrdDoc('', 'reports', 'draft');
+    store.setPrdDoc('', 'reports', ''); // delete
     const prd = new Store(dir).prd();
     expect(prd.summary?.md).toBe('# Herbert\nLocal analytics.');
     expect(Object.keys(prd.components)).toEqual(['dashboard']);
     expect(prd.components.dashboard.md).toBe('- must work behind a proxy');
+  });
+
+  it('keeps PRD docs and specs separate per repo, and lists the repos', () => {
+    const dir = tmpDir();
+    const store = new Store(dir);
+    store.setPrdDoc('/dev/alpha', '', '# Alpha');
+    store.setPrdDoc('/dev/alpha', 'server', '- alpha server');
+    store.setPrdDoc('/dev/beta', '', '# Beta');
+    store.addEvent({ type: 'specification', sessionId: null, repo: '/dev/alpha', summary: 'alpha spec', t: 1 });
+    store.addEvent({ type: 'specification', sessionId: null, repo: '/dev/beta', summary: 'beta spec', t: 2 });
+
+    // each repo sees only its own summary + component docs
+    const alpha = new Store(dir).prd('/dev/alpha');
+    expect(alpha.summary?.md).toBe('# Alpha');
+    expect(Object.keys(alpha.components)).toEqual(['server']);
+    const beta = store.prd('/dev/beta');
+    expect(beta.summary?.md).toBe('# Beta');
+    expect(Object.keys(beta.components)).toEqual([]);
+
+    // specs export is repo-scoped
+    expect(store.specs('/dev/alpha').map((s) => s.summary)).toEqual(['alpha spec']);
+    expect(store.specs('/dev/beta').map((s) => s.summary)).toEqual(['beta spec']);
+    // the picker sees both repos
+    expect(store.prdRepos()).toEqual(['/dev/alpha', '/dev/beta']);
+  });
+
+  it('files legacy repo-less docs under the unassigned bucket, and assigns imported specs to a repo', () => {
+    const dir = tmpDir();
+    // simulate a doc written before repo-scoping (no repo field on the line)
+    fs.writeFileSync(path.join(dir, 'prd.jsonl'), JSON.stringify({ component: '', md: '# Legacy', t: 1 }) + '\n');
+    const store = new Store(dir);
+    expect(store.prd('').summary?.md).toBe('# Legacy'); // '' = unassigned bucket
+    expect(store.prd('/dev/x').summary).toBeNull(); // not visible under a real repo
+
+    store.importSpec({ t: 9, summary: 'from a clone' }, '/dev/x');
+    expect(store.specs('/dev/x').map((s) => s.summary)).toEqual(['from a clone']);
+    expect(store.specs('').map((s) => s.summary)).toEqual([]);
+  });
+
+  it('stores a preview URL per session and surfaces it on that session only', () => {
+    const dir = tmpDir();
+    const store = new Store(dir);
+    store.upsertSession({ sessionId: 's1', cwd: '/dev/app', startedAt: 1 });
+    store.upsertSession({ sessionId: 's2', cwd: '/dev/app', startedAt: 2 }); // same repo, own preview
+    store.setPreviewUrl('s1', 'http://localhost:16399');
+
+    const reloaded = new Store(dir);
+    expect(reloaded.previewUrl('s1')).toBe('http://localhost:16399');
+    const sessions = reloaded.summary().sessions;
+    expect(sessions.find((s) => s.sessionId === 's1')!.previewUrl).toBe('http://localhost:16399');
+    // a different session of the same repo does NOT inherit it
+    expect(sessions.find((s) => s.sessionId === 's2')!.previewUrl).toBeUndefined();
+
+    // empty url clears it
+    store.setPreviewUrl('s1', '');
+    expect(new Store(dir).previewUrl('s1')).toBeUndefined();
   });
 
   it('persists the report window config across reload', () => {

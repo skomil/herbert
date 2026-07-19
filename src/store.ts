@@ -15,6 +15,15 @@ export const SPEC_FEEDBACK = [
 ] as const;
 export type SpecFeedback = (typeof SPEC_FEEDBACK)[number];
 
+/**
+ * A spec's position in the implementation lifecycle. An *absent* status means
+ * the spec is implemented/complete; these three are the active (not-yet-done)
+ * states shown as Kanban columns. 'proposed' also marks a user-added spec that
+ * was never implemented, and is what a revision reopens a spec to.
+ */
+export const SPEC_STATUSES = ['proposed', 'ready', 'in_progress'] as const;
+export type SpecStatus = (typeof SPEC_STATUSES)[number];
+
 export interface SummaryEvent {
   type: SummaryEventType;
   sessionId: string | null;
@@ -31,8 +40,8 @@ export interface SummaryEvent {
   context?: string;
   /** components this specification depends on (dashboard-set, specifications only) */
   deps?: string[];
-  /** 'proposed' = user-added and not yet implemented (dashboard-set, specifications only) */
-  status?: 'proposed';
+  /** active lifecycle state; absent = implemented/complete (dashboard-set, specifications only) */
+  status?: SpecStatus;
   /** pending revision comment; reopens the spec until re-implemented (specifications only) */
   revision?: string;
   t: number; // ms epoch
@@ -65,6 +74,18 @@ interface EvRec {
   success?: string;
 }
 
+/** One completed sub-agent run within a session, from a `subagent_completed` event. */
+export interface AgentRun {
+  type: string;
+  tokens: number;
+  toolUses: number;
+  durationMs: number;
+  model?: string;
+}
+
+/** An AgentRun with the session and time it belongs to, kept in the flat store. */
+type AgentRunRec = AgentRun & { t: number; sid: string };
+
 export interface SummaryFilter {
   from?: number;
   to?: number;
@@ -86,6 +107,10 @@ export interface SessionSummary extends SessionInfo {
   apiRequests: number;
   apiErrors: number;
   toolCalls: Record<string, { count: number; errors: number }>;
+  /** sub-agent runs (Explore, general-purpose, …) that ran under this session */
+  agents: AgentRun[];
+  /** configured preview URL for this session's repo (its running app), if any */
+  previewUrl?: string;
   specifications: SummaryEvent[];
   corrections: SummaryEvent[];
   retros: SummaryEvent[];
@@ -97,6 +122,7 @@ const OTEL_FILE = 'otel.jsonl';
 const FEEDBACK_FILE = 'feedback.jsonl';
 const ANNOTATIONS_FILE = 'annotations.jsonl';
 const PRD_FILE = 'prd.jsonl';
+const PREVIEW_FILE = 'previews.jsonl';
 const SETTINGS_FILE = 'settings.json';
 const RECENT_LIMIT = 200;
 
@@ -179,13 +205,16 @@ export class Store {
   /** spec timestamp → evolving classification (component/summary overrides, deps, status, revision, soft delete) */
   private specAnnotations = new Map<
     number,
-    { context?: string; deps?: string[]; status?: 'proposed'; summary?: string; revision?: string; deleted?: true }
+    { context?: string; deps?: string[]; status?: SpecStatus; summary?: string; revision?: string; deleted?: true }
   >();
   /** PRD markdown per component; '' is the product summary (last write wins) */
   private prdDocs = new Map<string, { md: string; t: number }>();
+  /** preview URL per session (its running app / preview server); last write wins */
+  private previewUrls = new Map<string, string>();
   private reportWindowCfg: ReportWindowConfig = { ...DEFAULT_REPORT_WINDOW };
   private increments: MetricIncrement[] = [];
   private eventRecords: EvRec[] = [];
+  private agentRuns: AgentRunRec[] = [];
   /** last raw value per cumulative/gauge series, for delta conversion */
   private lastBySeries = new Map<string, number>();
 
@@ -228,6 +257,7 @@ export class Store {
     for (const c of this.readLines(FEEDBACK_FILE)) this.mergeFeedback(c);
     for (const a of this.readLines(ANNOTATIONS_FILE)) this.mergeAnnotation(a);
     for (const p of this.readLines(PRD_FILE)) this.mergePrdDoc(p);
+    for (const p of this.readLines(PREVIEW_FILE)) this.mergePreview(p);
     try {
       const s = JSON.parse(fs.readFileSync(this.file(SETTINGS_FILE), 'utf8'));
       if (s?.reportWindow) this.reportWindowCfg = { ...this.reportWindowCfg, ...s.reportWindow };
@@ -284,23 +314,62 @@ export class Store {
     this.sessions.set(s.sessionId, { ...existing, ...s });
   }
 
-  /** Save PRD markdown for a component ('' = product summary); empty markdown deletes the doc. */
-  setPrdDoc(component: string, md: string): void {
-    const doc = { component, md, t: Date.now() };
+  /**
+   * Save PRD markdown for a repo's component ('' component = that repo's product
+   * summary; '' repo = the unassigned bucket for legacy docs). Empty markdown
+   * deletes the doc. Docs are keyed by repo so two projects on one machine keep
+   * separate PRDs.
+   */
+  setPrdDoc(repo: string, component: string, md: string): void {
+    const doc = { repo, component, md, t: Date.now() };
     this.mergePrdDoc(doc);
     this.appendLine(PRD_FILE, doc);
   }
 
-  private mergePrdDoc(doc: { component?: unknown; md?: unknown; t?: number }): void {
+  private mergePrdDoc(doc: { repo?: unknown; component?: unknown; md?: unknown; t?: number }): void {
     if (typeof doc?.component !== 'string' || typeof doc.md !== 'string') return;
-    if (doc.md.trim()) this.prdDocs.set(doc.component, { md: doc.md, t: doc.t ?? 0 });
-    else this.prdDocs.delete(doc.component);
+    // legacy docs written before repo-scoping have no repo → the unassigned bucket
+    const repo = typeof doc.repo === 'string' ? doc.repo : '';
+    const key = repo + '\x00' + doc.component;
+    if (doc.md.trim()) this.prdDocs.set(key, { md: doc.md, t: doc.t ?? 0 });
+    else this.prdDocs.delete(key);
   }
 
-  prd(): { summary: { md: string; t: number } | null; components: Record<string, { md: string; t: number }> } {
+  prd(repo = ''): { summary: { md: string; t: number } | null; components: Record<string, { md: string; t: number }> } {
+    const prefix = repo + '\x00';
     const components: Record<string, { md: string; t: number }> = {};
-    for (const [k, v] of this.prdDocs) if (k) components[k] = v;
-    return { summary: this.prdDocs.get('') ?? null, components };
+    let summary: { md: string; t: number } | null = null;
+    for (const [k, v] of this.prdDocs) {
+      if (!k.startsWith(prefix)) continue;
+      const component = k.slice(prefix.length);
+      if (component) components[component] = v;
+      else summary = v;
+    }
+    return { summary, components };
+  }
+
+  /** Repos that have PRD content (a doc or a spec), for the dashboard picker; '' = unassigned. */
+  prdRepos(): string[] {
+    const repos = new Set<string>();
+    for (const k of this.prdDocs.keys()) repos.add(k.slice(0, k.indexOf('\x00')));
+    for (const e of this.events) if (e.type === 'specification' && e.repo) repos.add(e.repo);
+    return [...repos].sort();
+  }
+
+  /** Set (or clear, with empty url) the preview URL for a session — its running app / preview server. */
+  setPreviewUrl(sessionId: string, url: string): void {
+    this.mergePreview({ sessionId, url });
+    this.appendLine(PREVIEW_FILE, { sessionId, url });
+  }
+
+  previewUrl(sessionId: string): string | undefined {
+    return this.previewUrls.get(sessionId);
+  }
+
+  private mergePreview(p: { sessionId?: unknown; url?: unknown }): void {
+    if (typeof p?.sessionId !== 'string' || typeof p.url !== 'string') return;
+    if (p.url) this.previewUrls.set(p.sessionId, p.url);
+    else this.previewUrls.delete(p.sessionId);
   }
 
   /** A specification with its dashboard feedback and evolving annotations merged in. */
@@ -318,22 +387,26 @@ export class Store {
     return out;
   }
 
-  /** All live specifications (annotations applied, soft-deleted excluded), for export. */
-  specs(): SummaryEvent[] {
+  /** Live specifications (annotations applied, soft-deleted excluded), for export; optionally scoped to one repo. */
+  specs(repo?: string): SummaryEvent[] {
     return this.events
       .filter((e) => e.type === 'specification' && this.specAnnotations.get(e.t)?.deleted !== true)
+      .filter((e) => repo === undefined || (e.repo ?? '') === repo)
       .map((e) => this.annotated(e));
   }
 
-  /** Add a specification shared via herbert.json; skips (returns false) if one already exists at its timestamp. */
-  importSpec(s: { t?: unknown; summary?: unknown; context?: unknown; deps?: unknown; status?: unknown }): boolean {
+  /** Add a specification shared via herbert.json, assigned to the importing `repo`; skips (returns false) if one already exists at its timestamp. */
+  importSpec(
+    s: { t?: unknown; summary?: unknown; context?: unknown; deps?: unknown; status?: unknown },
+    repo = '',
+  ): boolean {
     if (typeof s?.t !== 'number' || typeof s.summary !== 'string') return false;
     if (this.events.some((e) => e.type === 'specification' && e.t === s.t)) return false;
-    const event: SummaryEvent = { type: 'specification', sessionId: null, summary: s.summary, t: s.t };
+    const event: SummaryEvent = { type: 'specification', sessionId: null, repo: repo || null, summary: s.summary, t: s.t };
     if (typeof s.context === 'string' && s.context) event.context = s.context;
     this.addEvent(event);
     const deps = Array.isArray(s.deps) ? s.deps.filter((d): d is string => typeof d === 'string') : undefined;
-    const status = s.status === 'proposed' ? 'proposed' : undefined;
+    const status = SPEC_STATUSES.includes(s.status as SpecStatus) ? (s.status as SpecStatus) : undefined;
     // status/deps live in annotations so imported proposed specs stay editable in the receiving clone
     if (deps?.length || status) this.annotateSpec(s.t, { deps: deps ?? null, status: status ?? null });
     return true;
@@ -376,7 +449,7 @@ export class Store {
     ann: {
       context?: string | null;
       deps?: string[] | null;
-      status?: 'proposed' | null;
+      status?: SpecStatus | null;
       summary?: string | null;
       revision?: string | null;
       deleted?: boolean;
@@ -392,7 +465,7 @@ export class Store {
     spec?: number;
     context?: string | null;
     deps?: string[] | null;
-    status?: 'proposed' | null;
+    status?: SpecStatus | null;
     summary?: string | null;
     revision?: string | null;
     deleted?: boolean;
@@ -408,7 +481,7 @@ export class Store {
       else delete cur.deps;
     }
     if (a.status !== undefined) {
-      if (a.status === 'proposed') cur.status = a.status;
+      if (a.status) cur.status = a.status;
       else delete cur.status;
     }
     if (a.summary !== undefined) {
@@ -481,6 +554,19 @@ export class Store {
       tool: r.attrs['tool_name'] ?? r.attrs['name'],
       success: r.attrs['success'],
     });
+    // Sub-agents share the parent's session.id; each completed run is reported
+    // by its own event carrying the agent type and its resource usage.
+    if (r.name === 'subagent_completed') {
+      this.agentRuns.push({
+        t: r.t,
+        sid: r.attrs['session.id'] ?? 'unknown',
+        type: r.attrs['agent_type'] ?? r.attrs['agent.name'] ?? 'unknown',
+        tokens: Number(r.attrs['total_tokens']) || 0,
+        toolUses: Number(r.attrs['total_tool_uses']) || 0,
+        durationMs: Number(r.attrs['duration_ms']) || 0,
+        model: r.attrs['model'],
+      });
+    }
   }
 
   summary(filter: SummaryFilter = {}) {
@@ -492,9 +578,11 @@ export class Store {
     const get = (sid: string): SessionSummary => {
       let s = perSession.get(sid);
       if (!s) {
+        const info = this.sessions.get(sid);
         s = {
-          ...(this.sessions.get(sid) ?? {}),
+          ...(info ?? {}),
           sessionId: sid,
+          previewUrl: this.previewUrls.get(sid),
           tokens: {},
           cost: 0,
           costByModel: {},
@@ -507,6 +595,7 @@ export class Store {
           apiRequests: 0,
           apiErrors: 0,
           toolCalls: {},
+          agents: [],
           specifications: [],
           corrections: [],
           retros: [],
@@ -579,6 +668,17 @@ export class Store {
       }
       recentEvents.push({ t: e.t, name: e.name, sessionId: e.sid, tool: e.tool });
       if (recentEvents.length > RECENT_LIMIT) recentEvents.shift();
+    }
+
+    for (const a of this.agentRuns) {
+      if (!inRange(a.t) || !wantSid(a.sid)) continue;
+      get(a.sid).agents.push({
+        type: a.type,
+        tokens: a.tokens,
+        toolUses: a.toolUses,
+        durationMs: a.durationMs,
+        model: a.model,
+      });
     }
 
     const sessions = [...perSession.values()].sort(

@@ -89,6 +89,20 @@ export const TOOLS = [
         description: 'Get the URL of the local herbert analytics dashboard (starting the server if needed).',
         inputSchema: { type: 'object', properties: {} },
     },
+    {
+        name: 'set_preview_url',
+        description: "Set (or clear, with an empty string) the preview URL for the current session — the running app or preview server you launched for this session (e.g. http://localhost:3000). It appears as an 'Open ↗' link on this session's dashboard page. Call it right after starting a preview/dev server so the user can open the running work. Each session has its own preview URL, so parallel preview sessions don't collide.",
+        inputSchema: {
+            type: 'object',
+            properties: {
+                url: {
+                    type: 'string',
+                    description: 'An http(s) URL to the running preview, or an empty string to clear it.',
+                },
+            },
+            required: ['url'],
+        },
+    },
 ];
 function text(s, isError = false) {
     return { content: [{ type: 'text', text: s }], isError: isError || undefined };
@@ -132,9 +146,16 @@ async function postEvent(type, summary, sections = {}) {
     return text(`Logged ${type} (session ${result.event.sessionId ?? 'unknown'}).`);
 }
 async function getPrd() {
-    const [prd, summary] = await Promise.all([api('/api/prd'), api('/api/summary')]);
+    // scope the PRD to the calling session's repo so one machine's two projects don't bleed together
+    const repo = process.cwd();
+    const [prd, summary] = await Promise.all([
+        api('/api/prd?repo=' + encodeURIComponent(repo)),
+        api('/api/summary'),
+    ]);
     const byComp = {};
     for (const s of summary.specifications ?? []) {
+        if ((s.repo ?? '') !== repo)
+            continue; // only this repo's specs
         const c = s.context || 'general';
         (byComp[c] ??= []).push(s.summary);
     }
@@ -168,6 +189,29 @@ async function getSessionData(scope) {
     delete summary.recentEvents;
     return text(JSON.stringify(summary, null, 2));
 }
+/** The current session id — the env value the Claude process exports, else pid resolution. */
+async function currentSessionId() {
+    const envSid = envSessionId();
+    if (envSid)
+        return envSid;
+    const resolved = await api(`/api/resolve-session?pid=${process.ppid}`).catch(() => null);
+    return resolved?.session?.sessionId;
+}
+async function setPreviewUrl(url) {
+    if (typeof url !== 'string') {
+        return text('Error: url must be a string (an http(s) URL, or an empty string to clear).', true);
+    }
+    const sid = await currentSessionId();
+    if (!sid)
+        return text('Error: could not resolve the current session to attach the preview URL to.', true);
+    // the server rejects non-http(s) URLs (it renders them as an href), surfacing as an error here
+    await api('/api/preview', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: sid, url: url.trim() }),
+    });
+    return text(url.trim() ? `Preview URL set for this session: ${url.trim()}` : 'Preview URL cleared for this session.');
+}
 export async function callTool(name, args) {
     const ensured = await ensureServer(SERVER_PATH);
     if (ensured === 'failed') {
@@ -190,6 +234,8 @@ export async function callTool(name, args) {
             return getSessionData(typeof args.scope === 'string' ? args.scope : 'current');
         case 'dashboard_info':
             return text(`herbert dashboard: ${baseUrl()} (server ${ensured})`);
+        case 'set_preview_url':
+            return setPreviewUrl(args.url);
         default:
             return text(`Error: unknown tool "${name}".`, true);
     }

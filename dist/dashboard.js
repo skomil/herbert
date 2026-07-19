@@ -134,6 +134,20 @@ export function dashboardHtml() {
     box-shadow: 0 2px 8px rgba(0,0,0,0.15);
   }
   .scroll table { min-width: 560px; }
+  .kboard { display: flex; gap: 12px; margin-top: 16px; overflow-x: auto; padding-bottom: 8px; align-items: flex-start; }
+  .kcol { flex: 1 0 220px; min-width: 220px; background: var(--page); border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
+  .kcol.drop { border-color: var(--s1); background: color-mix(in srgb, var(--s1) 8%, var(--page)); }
+  .kcolhead { display: flex; justify-content: space-between; align-items: center; font-size: 12px; font-weight: 600; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 4px 8px; }
+  .kcount { background: color-mix(in srgb, var(--ink-1) 8%, transparent); color: var(--ink-2); border-radius: 10px; padding: 0 7px; font-size: 11px; }
+  .kcards { display: flex; flex-direction: column; gap: 8px; min-height: 40px; }
+  .kcard { background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; cursor: grab; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+  .kcard:active { cursor: grabbing; }
+  .kcard.dragging { opacity: 0.4; }
+  .kctx { font-size: 11px; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 3px; }
+  .ksum { font-size: 13px; color: var(--ink-1); line-height: 1.35; }
+  .krev { font-size: 11px; color: var(--s3); margin-top: 4px; }
+  .kcard input.sann { width: 100%; box-sizing: border-box; margin-top: 6px; font-size: 11px; }
+  .kempty { font-size: 12px; color: var(--ink-muted); text-align: center; padding: 8px 0; }
   @media (max-width: 640px) {
     body { padding: 12px; }
     .card { padding: 12px; margin-top: 12px; }
@@ -193,6 +207,8 @@ function state() {
     // spec map: hide spec nodes / dependency edges when set to '0'
     mspecs: h.get('mspecs') || '',
     mdeps: h.get('mdeps') || '',
+    // kanban board: hide the Complete column when set to '1'
+    khide: h.get('khide') || '',
   };
 }
 function hashFor(patch) {
@@ -200,7 +216,7 @@ function hashFor(patch) {
   const h = new URLSearchParams();
   if (s.range && s.range !== 'all') h.set('range', s.range);
   if (s.session) h.set('session', s.session);
-  for (const k of ['srepo', 'sctx', 'sspec', 'view', 'pcomp', 'sprop', 'mspecs', 'mdeps']) if (s[k]) h.set(k, s[k]);
+  for (const k of ['srepo', 'sctx', 'sspec', 'view', 'pcomp', 'sprop', 'mspecs', 'mdeps', 'khide']) if (s[k]) h.set(k, s[k]);
   return '#' + h.toString();
 }
 const repoNameOf = (r) => (r ? r.split('/').pop() || r : 'unknown');
@@ -273,7 +289,9 @@ document.addEventListener('click', (e) => {
   const context = prop.dataset.propose || (compInput ? compInput.value.trim() : '');
   const body = { type: 'specification', summary, status: 'proposed' };
   if (context) body.context = context;
-  if (REPO_HINT) body.cwd = REPO_HINT;
+  if (prop.dataset.session) body.sessionId = prop.dataset.session; // board: tie the spec to its session
+  if (prop.dataset.cwd) body.cwd = prop.dataset.cwd;
+  else if (REPO_HINT) body.cwd = REPO_HINT;
   fetch(new URL('api/events', document.baseURI), { method: 'POST', body: JSON.stringify(body) })
     .then(refresh);
 });
@@ -296,7 +314,8 @@ document.addEventListener('change', (e) => {
   if (ann) {
     ann.blur();
     const body = { spec: Number(ann.dataset.spec) };
-    ann.closest('.entry').querySelectorAll('input.sann[data-ann]').forEach((x) => {
+    // spec annotations group inside a PRD list entry or a kanban card
+    (ann.closest('.entry') || ann.closest('.kcard')).querySelectorAll('input.sann[data-ann]').forEach((x) => {
       body[x.dataset.ann] = x.dataset.ann === 'deps'
         ? x.value.split(',').map((v) => v.trim()).filter(Boolean)
         : x.value;
@@ -338,6 +357,48 @@ document.addEventListener('change', (e) => {
   }))).then(refresh);
 });
 
+// Kanban drag-and-drop: cards carry data-kcard=<spec t>, columns carry data-lane=<status>
+// (empty for Complete). Delegated so the handlers survive the 5s re-render.
+let DRAG_SPEC = null;
+document.addEventListener('dragstart', (e) => {
+  const card = e.target.closest('[data-kcard]');
+  if (!card) return;
+  DRAG_SPEC = card.dataset.kcard;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', DRAG_SPEC); // Firefox requires data to be set
+  card.classList.add('dragging');
+});
+document.addEventListener('dragend', (e) => {
+  const card = e.target.closest('[data-kcard]');
+  if (card) card.classList.remove('dragging');
+  document.querySelectorAll('.kcol.drop').forEach((c) => c.classList.remove('drop'));
+});
+document.addEventListener('dragover', (e) => {
+  const col = e.target.closest('[data-lane]');
+  if (!col || DRAG_SPEC === null) return;
+  e.preventDefault(); // signals a valid drop target
+  e.dataTransfer.dropEffect = 'move';
+  col.classList.add('drop');
+});
+document.addEventListener('dragleave', (e) => {
+  const col = e.target.closest('[data-lane]');
+  if (col && !col.contains(e.relatedTarget)) col.classList.remove('drop');
+});
+document.addEventListener('drop', (e) => {
+  const col = e.target.closest('[data-lane]');
+  if (!col) return;
+  e.preventDefault();
+  col.classList.remove('drop');
+  const spec = DRAG_SPEC || e.dataTransfer.getData('text/plain');
+  DRAG_SPEC = null;
+  if (!spec) return;
+  // empty lane = Complete: clearing the status marks the spec implemented
+  fetch(new URL('api/specs/annotate', document.baseURI), {
+    method: 'POST',
+    body: JSON.stringify({ spec: Number(spec), status: col.dataset.lane }),
+  }).then(refresh);
+});
+
 const opt = (v, label, cur) =>
   '<option value="' + v + '"' + (String(cur) === String(v) ? ' selected' : '') + '>' + label + '</option>';
 
@@ -362,6 +423,15 @@ function windowConfigControls(cfg) {
 
 function filterRow() {
   const s = state();
+  if (s.view === 'kanban') {
+    const hidden = s.khide === '1';
+    document.getElementById('filters').innerHTML =
+      '<a class="pill" href="' + hashFor({ view: '' }) + '">← Session ' + esc(shortId(s.session)) + '</a>' +
+      '<span class="flabel">Spec board</span>' +
+      '<a class="pill' + (hidden ? ' active' : '') + '" href="' + hashFor({ khide: hidden ? '' : '1' }) + '">' +
+      (hidden ? 'Show complete' : 'Hide complete') + '</a>';
+    return;
+  }
   if (s.view === 'prd') {
     document.getElementById('filters').innerHTML =
       '<a class="pill" href="' + hashFor({ view: '', pcomp: '', sctx: '', srepo: '', sspec: '', sprop: '' }) + '">← Dashboard</a>' +
@@ -494,6 +564,21 @@ function modelCostChart(costByModel) {
     '<span class="val">' + usd(cost) + '</span></div></div>').join('');
 }
 
+function agentChart(agents) {
+  const rows = (agents || []).slice().sort((a, b) => b.tokens - a.tokens);
+  if (!rows.length) return '<div class="empty">No sub-agents ran in this session in this range.</div>';
+  const max = rows[0].tokens || 1;
+  return rows.map((a) => {
+    const secs = Math.round((a.durationMs || 0) / 1000);
+    const tip = a.type + ' · ' + num(a.tokens) + ' tok · ' + num(a.toolUses) + ' tools · ' +
+      duration(secs) + (a.model ? ' · ' + a.model : '');
+    return '<div class="barrow"><div class="name" title="' + esc(a.type) + '">' + esc(a.type) + '</div>' +
+      '<div class="track"><div class="bar" data-tip="' + esc(tip) +
+      '" style="width:' + Math.max(1, (a.tokens / max) * 100) + '%"></div>' +
+      '<span class="val">' + compact(a.tokens) + '</span></div></div>';
+  }).join('');
+}
+
 function sessionsTable(d) {
   if (!d.sessions.length) return '<div class="empty">No sessions in this range.</div>';
   const rows = d.sessions.map((s) =>
@@ -574,13 +659,17 @@ function renderMd(src) {
 let REPO_HINT = ''; // most common repo among visible specs; attached to user-proposed specs
 
 // user-authored, not-yet-implemented spec; component fixed (drill-down) or free input (root)
-function proposeForm(component) {
+function proposeForm(component, opts) {
+  const o = opts || {};
+  // on the kanban board the new spec is tied to the board's session + repo
+  const scope = (o.session ? ' data-session="' + esc(o.session) + '"' : '') +
+    (o.cwd ? ' data-cwd="' + esc(o.cwd) + '"' : '');
   return '<div class="propose">' +
     (component === null
       ? '<input class="sann" id="prop-comp" list="known-components" placeholder="component">'
       : '') +
     '<input class="sann prop-sum" placeholder="Propose a spec (not yet implemented)…">' +
-    '<button class="pill" data-propose' + (component === null ? '' : '="' + esc(component) + '"') + '>Add proposed spec</button></div>';
+    '<button class="pill" data-propose' + (component === null ? '' : '="' + esc(component) + '"') + scope + '>Add proposed spec</button></div>';
 }
 
 function prdDoc(component, doc, placeholder) {
@@ -592,13 +681,24 @@ function prdDoc(component, doc, placeholder) {
     '<button class="pill" data-edit style="margin-top:8px">Edit</button></div>';
 }
 
+// Repo scope selector for the PRD page; '' value is the unassigned bucket for legacy docs.
+function prdRepoPicker(repos, current) {
+  const list = repos.includes(current) ? repos : [current, ...repos];
+  const opts = list.map((r) =>
+    '<option value="' + esc(r) + '"' + (r === current ? ' selected' : '') + '>' +
+    esc(r ? repoNameOf(r) : '(unassigned)') + '</option>').join('');
+  return '<span class="flabel">Repo</span><select class="pill" id="prd-repo">' + opts + '</select>';
+}
+
 function renderPrd(d, prd, s) {
-  const repoCounts = new Map();
-  d.specifications.forEach((e) => { if (e.repo) repoCounts.set(e.repo, (repoCounts.get(e.repo) || 0) + 1); });
-  REPO_HINT = [...repoCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || '';
+  REPO_HINT = s.srepo; // specs proposed on this page belong to the repo being viewed
+  const repoPicker = prdRepoPicker(prd.repos || [], s.srepo);
+  // the PRD is scoped to one repo: only that repo's specs feed the components table and map
+  const repoSpecs = d.specifications.filter((e) => (e.repo || 'unknown') === s.srepo);
   if (s.pcomp) {
-    const specs = d.specifications.filter((e) => (e.context || 'general') === s.pcomp);
+    const specs = repoSpecs.filter((e) => (e.context || 'general') === s.pcomp);
     document.getElementById('main').innerHTML =
+      '<div class="filters" style="margin-top:16px">' + repoPicker + '</div>' +
       card('Requirements — ' + s.pcomp,
         prdDoc(s.pcomp, prd.components[s.pcomp], 'No requirements written for this component yet — click Edit.')) +
       specGraphCard(specs, s) +
@@ -606,10 +706,11 @@ function renderPrd(d, prd, s) {
         entryList(specs, 'No specifications logged for this component.', true) + proposeForm(s.pcomp)) +
       knownComponents(d.specifications);
     bindSpecMap();
+    bindPrdRepo();
   } else {
     const filtered = filterSpecs(d.specifications, s);
     const comps = new Map();
-    d.specifications.forEach((e) => { const c = e.context || 'general'; comps.set(c, (comps.get(c) || 0) + 1); });
+    repoSpecs.forEach((e) => { const c = e.context || 'general'; comps.set(c, (comps.get(c) || 0) + 1); });
     Object.keys(prd.components).forEach((c) => { if (!comps.has(c)) comps.set(c, 0); });
     const rows = [...comps.entries()].sort((a, b) => b[1] - a[1]).map(([c, n]) =>
       '<tr class="clickable" data-pcomp="' + esc(c) + '"><td>' + esc(c) + '</td>' +
@@ -617,7 +718,8 @@ function renderPrd(d, prd, s) {
       '<td>' + (prd.components[c] ? 'written' : '—') + '</td></tr>').join('');
     document.getElementById('main').innerHTML =
       '<div class="filters" style="margin-top:16px">' +
-        '<a class="pill" href="api/prd/export" download="herbert.json">Export herbert.json</a>' +
+        repoPicker +
+        '<a class="pill" href="api/prd/export?repo=' + encodeURIComponent(s.srepo) + '" download="herbert.json">Export herbert.json</a>' +
         '<label class="pill" style="cursor:pointer">Import herbert.json<input type="file" id="prd-import" accept=".json,application/json" hidden></label>' +
         '<span class="flabel">commit herbert.json to the repo to share the PRD</span>' +
       '</div>' +
@@ -632,13 +734,16 @@ function renderPrd(d, prd, s) {
       tr.addEventListener('click', () => { location.hash = hashFor({ pcomp: tr.dataset.pcomp }); }));
     bindSpecMap();
     bindSpecsSection(s);
+    bindPrdRepo();
     const imp = document.getElementById('prd-import');
     imp.addEventListener('change', () => {
       const f = imp.files[0];
       if (!f) return;
       imp.blur(); // release focus so the post-import refresh isn't suppressed
       f.text()
-        .then((raw) => fetch(new URL('api/prd/import', document.baseURI), { method: 'POST', body: raw }))
+        // file the imported PRD under the repo currently in view
+        .then((raw) => JSON.stringify({ ...JSON.parse(raw), repo: s.srepo }))
+        .then((body) => fetch(new URL('api/prd/import', document.baseURI), { method: 'POST', body }))
         .then(refresh);
     });
   }
@@ -651,9 +756,18 @@ function renderPrd(d, prd, s) {
       editor.hidden = true; // close first so the refresh guard doesn't block the re-render
       fetch(new URL('api/prd', document.baseURI), {
         method: 'POST',
-        body: JSON.stringify({ component: box.dataset.component, md: editor.querySelector('textarea').value }),
+        body: JSON.stringify({ repo: s.srepo, component: box.dataset.component, md: editor.querySelector('textarea').value }),
       }).then(refresh);
     });
+  });
+}
+
+// The repo scope selector re-scopes the whole PRD page, clearing any component/spec drill-down.
+function bindPrdRepo() {
+  const sel = document.getElementById('prd-repo');
+  if (sel) sel.addEventListener('change', () => {
+    sel.blur(); // release focus so the hashchange refresh isn't suppressed by the activeElement guard
+    location.hash = hashFor({ srepo: sel.value, pcomp: '', sctx: '', sspec: '' });
   });
 }
 
@@ -661,9 +775,9 @@ function renderPrd(d, prd, s) {
 // Nodes double as filters for the Specifications card (state in the hash).
 function specGraphCard(specs, s) {
   if (!specs.length) return '';
-  const tree = new Map(); // repo → (component → specs), in logged order
+  const tree = new Map(); // repo (full path) → (component → specs), in logged order
   specs.forEach((e) => {
-    const r = repoNameOf(e.repo);
+    const r = e.repo || 'unknown';
     const c = e.context || 'general';
     if (!tree.has(r)) tree.set(r, new Map());
     const comps = tree.get(r);
@@ -710,7 +824,7 @@ function specGraphCard(specs, s) {
     }
     const ry = mid(compYs);
     nodes.push({
-      x: 0, w: 150, y: ry, label: trunc(r, 20), tip: r,
+      x: 0, w: 150, y: ry, label: trunc(repoNameOf(r), 20), tip: r,
       data: 'data-srepo="' + esc(r) + '"',
       active: !s.sspec && s.srepo === r && !s.sctx, level: ' glevel',
     });
@@ -827,7 +941,7 @@ function filterSpecs(specs, s) {
   let out = specs;
   if (s.sspec) out = out.filter((e) => String(e.t) === s.sspec);
   else {
-    if (s.srepo) out = out.filter((e) => repoNameOf(e.repo) === s.srepo);
+    if (s.srepo) out = out.filter((e) => (e.repo || 'unknown') === s.srepo);
     if (s.sctx) out = out.filter((e) => (e.context || 'general') === s.sctx);
   }
   if (s.sprop) out = out.filter((e) => e.status === 'proposed');
@@ -860,9 +974,44 @@ function bindSpecsSection(s) {
   });
 }
 
+const KANBAN_LANES = [
+  { key: 'proposed', label: 'Proposed' },
+  { key: 'ready', label: 'Ready to pick up' },
+  { key: 'in_progress', label: 'In progress' },
+  { key: '', label: 'Complete' },
+];
+
+function kanbanCard(e) {
+  return '<div class="kcard" draggable="true" data-kcard="' + e.t + '">' +
+    (e.context ? '<div class="kctx">' + esc(e.context) + '</div>' : '') +
+    '<div class="ksum">' + esc(e.summary) + '</div>' +
+    (e.revision ? '<div class="krev">Pending revision: ' + esc(e.revision) + '</div>' : '') +
+    '<input class="sann" data-spec="' + e.t + '" data-ann="revision" placeholder="revision (reopens spec)" value="' + esc(e.revision || '') + '">' +
+    '</div>';
+}
+
+// Single-session spec board: columns are lifecycle statuses, cards drag between them.
+function renderKanban(d, sid, s) {
+  const specs = d.specifications;
+  const cwd = (d.sessions.find((x) => x.sessionId === sid) || {}).cwd || '';
+  const lanes = KANBAN_LANES.filter((l) => !(s.khide === '1' && l.key === ''));
+  const board = lanes.map((l) => {
+    const items = specs.filter((e) => (e.status || '') === l.key);
+    // the Proposed column carries an "add" form; new specs are tied to this session + repo
+    const add = l.key === 'proposed' ? proposeForm(null, { session: sid, cwd }) : '';
+    return '<div class="kcol" data-lane="' + l.key + '">' +
+      '<div class="kcolhead"><span>' + esc(l.label) + '</span><span class="kcount">' + items.length + '</span></div>' +
+      '<div class="kcards">' + (items.map(kanbanCard).join('') || '<div class="kempty">drop here</div>') + '</div>' +
+      add + '</div>';
+  }).join('');
+  const empty = specs.length ? '' : '<div class="empty">No specifications for this session yet.</div>';
+  document.getElementById('main').innerHTML =
+    '<div class="kboard">' + board + '</div>' + empty + knownComponents(specs);
+}
+
 function renderSession(d, sid) {
   const s = d.sessions.find((x) => x.sessionId === sid) ??
-    { sessionId: sid, tokens: {}, toolCalls: {}, cost: 0, prompts: 0, linesAdded: 0, linesRemoved: 0, activeTimeSec: 0 };
+    { sessionId: sid, tokens: {}, toolCalls: {}, agents: [], cost: 0, prompts: 0, linesAdded: 0, linesRemoved: 0, activeTimeSec: 0 };
   const specs = d.specifications;
   const common = specs.length && specs.every((x) => x.feedback === specs[0].feedback)
     ? (specs[0].feedback || '') : '';
@@ -870,12 +1019,22 @@ function renderSession(d, sid) {
     ? '<div class="meta-line"><span class="flabel">Feedback on all ' + specs.length + ' specification' + (specs.length === 1 ? '' : 's') + '</span>' +
       feedbackSelect(common, 'data-specs="' + specs.map((x) => x.t).join(',') + '"') + '</div>'
     : '';
+  // per-session preview URL: read-only link; the URL is set by the agent via the set_preview_url MCP tool
+  const previewRow =
+    '<div class="meta-line"><span class="flabel">Preview</span>' +
+    (s.previewUrl
+      ? '<a class="pill" href="' + esc(s.previewUrl) + '" target="_blank" rel="noopener">Open ↗</a>' +
+        '<span class="mono">' + esc(s.previewUrl) + '</span>'
+      : '<span class="flabel">set via the set_preview_url MCP tool</span>') +
+    '</div>';
   const meta =
-    '<div class="meta-line"><a class="back" href="' + hashFor({ session: '' }) + '">← All sessions</a></div>' +
+    '<div class="meta-line"><a class="back" href="' + hashFor({ session: '' }) + '">← All sessions</a>' +
+    '<a class="pill" href="' + hashFor({ view: 'kanban' }) + '">Spec board →</a></div>' +
     '<div class="meta-line"><span class="mono">' + esc(s.sessionId) + '</span>' +
     (s.cwd ? '<span class="mono">' + esc(s.cwd) + '</span>' : '') +
     esc(when(s.startedAt)) + ' → ' + (s.endedAt ? esc(when(s.endedAt)) : 'active') +
     (s.source ? ' · ' + esc(s.source) : '') + '</div>' +
+    previewRow +
     sessionFeedback;
   document.getElementById('main').innerHTML =
     meta +
@@ -883,6 +1042,7 @@ function renderSession(d, sid) {
     card('Tool usage', toolChart(s.toolCalls)) +
     card('Tokens by type', tokenChartByType(s)) +
     card('Cost by model', modelCostChart(s.costByModel)) +
+    card('Sub-agents', agentChart(s.agents)) +
     card('Specifications', entryList(d.specifications, 'No specifications logged for this session in this range.', false)) +
     card('Corrections', entryList(d.corrections, 'No corrections logged for this session in this range.', false)) +
     card('Retros', entryList(d.retros, 'No retros saved for this session in this range.', false)) +
@@ -909,13 +1069,28 @@ async function refresh() {
     }
     if (s.session) params.set('session', s.session);
     const get = (q) => fetch(new URL('api/summary?' + q, document.baseURI)).then((r) => r.json());
-    if (s.view === 'prd') {
-      const [d, prd] = await Promise.all([
-        get(new URLSearchParams()), // the PRD always reflects all specs, not the range filter
-        fetch(new URL('api/prd', document.baseURI)).then((r) => r.json()),
-      ]);
+    if (s.view === 'kanban') {
+      if (!s.session) { location.hash = hashFor({ view: '' }); return; } // the board needs a session
+      // all-time, session-scoped: the board tracks every spec of the session regardless of range
+      const d = await get('session=' + encodeURIComponent(s.session));
       document.getElementById('updated').textContent = 'updated ' + new Date(d.generatedAt).toLocaleTimeString();
-      renderPrd(d, prd, s);
+      renderKanban(d, s.session, s);
+      return;
+    }
+    if (s.view === 'prd') {
+      const d = await get(new URLSearchParams()); // the PRD always reflects all specs, not the range filter
+      // scope to one repo: the explicit picker choice, else the repo of the session you clicked in
+      // from (the active repo), else the most recently active session's repo, else the busiest
+      const sessionRepo = s.session ? (d.sessions.find((x) => x.sessionId === s.session) || {}).cwd || '' : '';
+      const recentRepo = (d.sessions.find((x) => x.cwd) || {}).cwd || '';
+      const counts = {};
+      d.specifications.forEach((e) => { const r = e.repo || ''; if (r) counts[r] = (counts[r] || 0) + 1; });
+      const busiest = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] || '';
+      const repo = s.srepo || sessionRepo || recentRepo || busiest;
+      const prd = await fetch(new URL('api/prd?repo=' + encodeURIComponent(repo), document.baseURI)).then((r) => r.json());
+      document.getElementById('updated').textContent = 'updated ' + new Date(d.generatedAt).toLocaleTimeString();
+      // pass the resolved repo so docs, specs, and the components table all scope to it
+      renderPrd(d, prd, { ...s, srepo: repo });
       return;
     }
     const [d, day] = await Promise.all([get(params), s.session ? null : get('from=' + (Date.now() - 864e5))]);

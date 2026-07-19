@@ -272,6 +272,36 @@ describe('server', () => {
     expect(bad.status).toBe(400);
   });
 
+  it('moves a spec across kanban statuses and clears it on drop into Complete', async () => {
+    const created: any = await (await fetch(url('/api/events'), {
+      method: 'POST',
+      body: JSON.stringify({ type: 'specification', sessionId: 'sess-1', summary: 'Board me' }),
+    })).json();
+    const t = created.event.t;
+    const statusOf = async () =>
+      (await (await fetch(url('/api/summary'))).json()).specifications.find((e: any) => e.t === t).status;
+
+    for (const status of ['proposed', 'ready', 'in_progress']) {
+      const res = await fetch(url('/api/specs/annotate'), {
+        method: 'POST',
+        body: JSON.stringify({ spec: t, status }),
+      });
+      expect(res.status).toBe(200);
+      expect(await statusOf()).toBe(status);
+    }
+    // dragging into Complete clears the status (empty string = implemented)
+    await fetch(url('/api/specs/annotate'), { method: 'POST', body: JSON.stringify({ spec: t, status: '' }) });
+    expect(await statusOf()).toBeUndefined();
+
+    // an unknown status is rejected
+    const bad = await fetch(url('/api/specs/annotate'), {
+      method: 'POST',
+      body: JSON.stringify({ spec: t, status: 'doing' }),
+    });
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).error).toMatch(/proposed, ready, in_progress/);
+  });
+
   it('exports and imports the PRD as herbert.json', async () => {
     await fetch(url('/api/prd'), { method: 'POST', body: JSON.stringify({ component: 'mcp', md: '- six tools' }) });
     const res = await fetch(url('/api/prd/export'));
@@ -341,6 +371,44 @@ describe('server', () => {
 
     const badSpecs = await fetch(url('/api/prd/import'), { method: 'POST', body: JSON.stringify({ specifications: {} }) });
     expect(badSpecs.status).toBe(400);
+  });
+
+  it('scopes PRD docs and export by repo, and lists the repos for the picker', async () => {
+    await fetch(url('/api/prd'), { method: 'POST', body: JSON.stringify({ repo: '/dev/alpha', md: '# Alpha' }) });
+    await fetch(url('/api/prd'), { method: 'POST', body: JSON.stringify({ repo: '/dev/alpha', component: 'api', md: '- alpha api' }) });
+    await fetch(url('/api/prd'), { method: 'POST', body: JSON.stringify({ repo: '/dev/beta', md: '# Beta' }) });
+    await fetch(url('/api/events'), {
+      method: 'POST',
+      body: JSON.stringify({ type: 'specification', summary: 'alpha only spec', context: 'api', cwd: '/dev/alpha' }),
+    });
+
+    // each repo sees only its own docs
+    const alpha: any = await (await fetch(url('/api/prd?repo=' + encodeURIComponent('/dev/alpha')))).json();
+    expect(alpha.summary.md).toBe('# Alpha');
+    expect(alpha.components.api.md).toBe('- alpha api');
+    const beta: any = await (await fetch(url('/api/prd?repo=' + encodeURIComponent('/dev/beta')))).json();
+    expect(beta.summary.md).toBe('# Beta');
+    expect(beta.components.api).toBeUndefined();
+    // the repo list surfaces both (plus any others from earlier tests)
+    expect(alpha.repos).toContain('/dev/alpha');
+    expect(alpha.repos).toContain('/dev/beta');
+
+    // export is scoped to one repo — beta's file carries neither alpha's docs nor alpha's spec
+    const file: any = await (await fetch(url('/api/prd/export?repo=' + encodeURIComponent('/dev/beta')))).json();
+    expect(file.summary).toBe('# Beta');
+    expect(file.components.api).toBeUndefined();
+    expect(file.specifications.some((s: any) => s.summary === 'alpha only spec')).toBe(false);
+
+    // importing into a target repo files the content there
+    const imp: any = await (await fetch(url('/api/prd/import'), {
+      method: 'POST',
+      body: JSON.stringify({ repo: '/dev/beta', components: { ui: '- beta ui' }, specifications: [{ t: 778899, summary: 'imported beta spec' }] }),
+    })).json();
+    expect(imp.importedSpecs).toBe(1);
+    const beta2: any = await (await fetch(url('/api/prd?repo=' + encodeURIComponent('/dev/beta')))).json();
+    expect(beta2.components.ui.md).toBe('- beta ui');
+    const betaSpecs: any = await (await fetch(url('/api/summary'))).json();
+    expect(betaSpecs.specifications.find((e: any) => e.t === 778899).repo).toBe('/dev/beta');
   });
 
   it('saves and serves PRD docs', async () => {
@@ -435,6 +503,35 @@ describe('server', () => {
       body: JSON.stringify({ spec: 1, feedback: 'dispute' }),
     });
     expect(missing.status).toBe(404);
+  });
+
+  it('sets a per-session preview URL, surfaces it on that session, and rejects non-http URLs', async () => {
+    await fetch(url('/api/sessions'), {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: 'prev-sess', cwd: '/dev/app', startedAt: 10 }),
+    });
+    const ok = await fetch(url('/api/preview'), {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: 'prev-sess', url: 'http://localhost:5173' }),
+    });
+    expect(ok.status).toBe(200);
+    const summary: any = await (await fetch(url('/api/summary?session=prev-sess'))).json();
+    expect(summary.sessions.find((s: any) => s.sessionId === 'prev-sess').previewUrl).toBe('http://localhost:5173');
+
+    // a javascript: URL is rejected (it would be rendered as an href)
+    const bad = await fetch(url('/api/preview'), {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: 'prev-sess', url: 'javascript:alert(1)' }),
+    });
+    expect(bad.status).toBe(400);
+    // sessionId is required
+    const noSess = await fetch(url('/api/preview'), { method: 'POST', body: JSON.stringify({ url: 'http://x' }) });
+    expect(noSess.status).toBe(400);
+
+    // empty url clears it
+    await fetch(url('/api/preview'), { method: 'POST', body: JSON.stringify({ sessionId: 'prev-sess', url: '' }) });
+    const cleared: any = await (await fetch(url('/api/summary?session=prev-sess'))).json();
+    expect(cleared.sessions.find((s: any) => s.sessionId === 'prev-sess').previewUrl).toBeUndefined();
   });
 
   it('serves and updates the report window config', async () => {
@@ -533,6 +630,18 @@ describe('server', () => {
     expect(html).toContain('data-impl');
     expect(html).toContain('api/prd/export');
     expect(html).toContain('gproposed');
+    // single-session kanban board: drag-and-drop cards across status columns, hide-complete toggle
+    expect(html).toContain('renderKanban');
+    expect(html).toContain('data-kcard');
+    expect(html).toContain('data-lane');
+    expect(html).toContain('dragstart');
+    expect(html).toContain('khide');
+    // per-session preview link on the session page (read-only; the URL is set via the MCP tool)
+    expect(html).toContain('previewUrl');
+    expect(html).toContain('set_preview_url');
+    // repo-scoped PRD page: repo picker scopes docs + specs + export
+    expect(html).toContain('prd-repo');
+    expect(html).toContain('api/prd/export?repo=');
   });
 
   it('renders session selection at the top of the overall view', async () => {

@@ -35,7 +35,7 @@ describe('MCP protocol', () => {
     expect(res.result.protocolVersion).toBe('2025-06-18');
   });
 
-  it('lists the six tools', async () => {
+  it('lists the seven tools', async () => {
     const res = await handleRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
     expect(res.result.tools.map((t: any) => t.name)).toEqual([
       'log_specification',
@@ -44,8 +44,38 @@ describe('MCP protocol', () => {
       'get_prd',
       'get_session_data',
       'dashboard_info',
+      'set_preview_url',
     ]);
     for (const tool of TOOLS) expect(tool.description.length).toBeGreaterThan(20);
+  });
+
+  it('sets the current session\'s preview URL via the MCP tool', async () => {
+    // the MCP resolves the session from CLAUDE_CODE_SESSION_ID (overridden below) or the ppid
+    const prev = process.env.CLAUDE_CODE_SESSION_ID;
+    process.env.CLAUDE_CODE_SESSION_ID = 'mcp-prev-sess';
+    try {
+      await fetch(`http://127.0.0.1:${PORT}/api/sessions`, {
+        method: 'POST',
+        body: JSON.stringify({ sessionId: 'mcp-prev-sess', startedAt: 1 }),
+      });
+      const res = await callTool('set_preview_url', { url: 'http://localhost:16399' });
+      expect(res.isError).toBeUndefined();
+      const summary: any = await (await fetch(`http://127.0.0.1:${PORT}/api/summary?session=mcp-prev-sess`)).json();
+      expect(summary.sessions.find((s: any) => s.sessionId === 'mcp-prev-sess').previewUrl).toBe('http://localhost:16399');
+
+      // a non-http URL is rejected by the server; handleRequest wraps the error into an isError result
+      const bad = await handleRequest({
+        jsonrpc: '2.0',
+        id: 9,
+        method: 'tools/call',
+        params: { name: 'set_preview_url', arguments: { url: 'javascript:alert(1)' } },
+      });
+      expect(bad.result.isError).toBe(true);
+      expect(bad.result.content[0].text).toMatch(/http/);
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+      else process.env.CLAUDE_CODE_SESSION_ID = prev;
+    }
   });
 
   it('ignores notifications', async () => {
@@ -100,16 +130,23 @@ describe('MCP tools', () => {
     }
   });
 
-  it('assembles the PRD from docs and specs grouped by component', async () => {
+  it('assembles the PRD from docs and specs grouped by component, scoped to the calling repo', async () => {
+    // get_prd and log_specification both scope to process.cwd(); docs must be filed there too
+    const repo = process.cwd();
     await fetch(`http://127.0.0.1:${PORT}/api/prd`, {
       method: 'POST',
-      body: JSON.stringify({ md: 'Local analytics for Claude Code.' }),
+      body: JSON.stringify({ repo, md: 'Local analytics for Claude Code.' }),
     });
     await fetch(`http://127.0.0.1:${PORT}/api/prd`, {
       method: 'POST',
-      body: JSON.stringify({ component: 'dashboard', md: '- single page, hash routing' }),
+      body: JSON.stringify({ repo, component: 'dashboard', md: '- single page, hash routing' }),
     });
     await callTool('log_specification', { summary: 'Charts refresh every 5s', context: 'dashboard' });
+    // a spec belonging to another repo must NOT leak into this repo's PRD
+    await fetch(`http://127.0.0.1:${PORT}/api/events`, {
+      method: 'POST',
+      body: JSON.stringify({ type: 'specification', summary: 'Other repo secret', context: 'dashboard', cwd: '/some/other/repo' }),
+    });
 
     const res = await callTool('get_prd', {});
     const out = res.content[0].text;
@@ -117,6 +154,7 @@ describe('MCP tools', () => {
     expect(out).toContain('## Component: dashboard');
     expect(out).toContain('- single page, hash routing');
     expect(out).toContain('- Charts refresh every 5s');
+    expect(out).not.toContain('Other repo secret'); // cross-repo bleed is the bug being fixed
   });
 
   it('saves retros', async () => {

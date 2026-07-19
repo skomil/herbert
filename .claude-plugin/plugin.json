@@ -1,6 +1,6 @@
 {
   "name": "herbert",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local, self-contained analytics for Claude Code: an OTel-fed dashboard of usage per session, spec/correction logging (≤599-char summaries), and persisted session retros. One session hosts the shared local server; the rest connect as clients.",
   "author": {
     "name": "herbert"
