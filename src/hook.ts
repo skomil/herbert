@@ -7,7 +7,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { baseUrl } from './config.js';
+import { VERSION, baseUrl } from './config.js';
 import { ensureServer } from './ensure.js';
 import { specDetailGuidance } from './store.js';
 
@@ -79,7 +79,13 @@ async function main(): Promise<void> {
         hookSpecificOutput: {
           hookEventName: 'SessionStart',
           additionalContext:
-            `herbert analytics ${ensured === 'started' ? 'server started (this session is the server)' : 'server already running (this session is a client)'}; dashboard at ${baseUrl()}. ` +
+            `herbert analytics ${
+              ensured === 'started'
+                ? 'server started (this session is the server)'
+                : ensured === 'restarted'
+                  ? `server restarted to v${VERSION} (this session is the server)`
+                  : 'server already running (this session is a client)'
+            }; dashboard at ${baseUrl()}. ` +
             'Call the get_prd tool before beginning work to load the product summary and per-component requirements. As the session runs: when the user states a requirement, decision, or constraint, record it with the log_specification tool, passing a short context naming the part of the system it concerns (e.g. "session page", "MCP server"); when the user corrects or redirects your approach, record it with log_correction. Each takes one summary statement under 599 characters distilled from what was provided.' +
             (guidance ? ' ' + guidance : ''),
         },
