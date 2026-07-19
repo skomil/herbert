@@ -25,6 +25,15 @@ export type SpecFeedback = (typeof SPEC_FEEDBACK)[number];
 export const SPEC_STATUSES = ['proposed', 'ready', 'in_progress', 'complete'] as const;
 export type SpecStatus = (typeof SPEC_STATUSES)[number];
 
+/**
+ * Sub-stage of an in_progress spec, shown on its Kanban card. Only meaningful
+ * while status is 'in_progress': such a spec always resolves to one (default
+ * 'planning'), and a spec in any other status never carries a stage — so a
+ * card's stage can never mismatch its status.
+ */
+export const SPEC_STAGES = ['planning', 'implementing', 'verifying'] as const;
+export type SpecStage = (typeof SPEC_STAGES)[number];
+
 export interface SummaryEvent {
   type: SummaryEventType;
   sessionId: string | null;
@@ -43,6 +52,8 @@ export interface SummaryEvent {
   deps?: string[];
   /** lifecycle state; always set on specs in summaries ('complete' = implemented) (dashboard-set) */
   status?: SpecStatus;
+  /** in_progress sub-stage (planning|implementing|verifying); present iff status is 'in_progress' */
+  stage?: SpecStage;
   /** pending revision comment; reopens the spec until re-implemented (specifications only) */
   revision?: string;
   t: number; // ms epoch
@@ -206,7 +217,15 @@ export class Store {
   /** spec timestamp → evolving classification (component/summary overrides, deps, status, revision, soft delete) */
   private specAnnotations = new Map<
     number,
-    { context?: string; deps?: string[]; status?: SpecStatus; summary?: string; revision?: string; deleted?: true }
+    {
+      context?: string;
+      deps?: string[];
+      status?: SpecStatus;
+      stage?: SpecStage;
+      summary?: string;
+      revision?: string;
+      deleted?: true;
+    }
   >();
   /** PRD markdown per component; '' is the product summary (last write wins) */
   private prdDocs = new Map<string, { md: string; t: number }>();
@@ -384,6 +403,8 @@ export class Store {
     if (a?.deps) out.deps = a.deps;
     if (a?.summary) out.summary = a.summary; // proposed specs are editable in place
     if (a?.revision) out.revision = a.revision;
+    // stage is a sub-state of in_progress only; emitting it solely here keeps it from ever mismatching the status
+    if (out.status === 'in_progress') out.stage = a?.stage ?? 'planning';
     return out;
   }
 
@@ -450,6 +471,7 @@ export class Store {
       context?: string | null;
       deps?: string[] | null;
       status?: SpecStatus | null;
+      stage?: SpecStage | null;
       summary?: string | null;
       revision?: string | null;
       deleted?: boolean;
@@ -466,6 +488,7 @@ export class Store {
     context?: string | null;
     deps?: string[] | null;
     status?: SpecStatus | null;
+    stage?: SpecStage | null;
     summary?: string | null;
     revision?: string | null;
     deleted?: boolean;
@@ -483,6 +506,10 @@ export class Store {
     if (a.status !== undefined) {
       if (a.status) cur.status = a.status;
       else delete cur.status;
+    }
+    if (a.stage !== undefined) {
+      if (a.stage) cur.stage = a.stage;
+      else delete cur.stage;
     }
     if (a.summary !== undefined) {
       if (a.summary) cur.summary = a.summary;

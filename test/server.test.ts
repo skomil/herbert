@@ -302,6 +302,35 @@ describe('server', () => {
     expect((await bad.json()).error).toMatch(/proposed, ready, in_progress/);
   });
 
+  it('logs a spec directly with a status and tracks the in_progress stage', async () => {
+    // log-with-status: create straight into in_progress (previously only 'proposed' was allowed at creation)
+    const created: any = await (await fetch(url('/api/events'), {
+      method: 'POST',
+      body: JSON.stringify({ type: 'specification', summary: 'Build the thing', status: 'in_progress' }),
+    })).json();
+    const t = created.event.t;
+    const specOf = async () =>
+      (await (await fetch(url('/api/summary'))).json()).specifications.find((e: any) => e.t === t);
+
+    let spec = await specOf();
+    expect(spec.status).toBe('in_progress');
+    expect(spec.stage).toBe('planning'); // default sub-stage
+
+    await fetch(url('/api/specs/annotate'), { method: 'POST', body: JSON.stringify({ spec: t, stage: 'implementing' }) });
+    expect((await specOf()).stage).toBe('implementing');
+
+    const bad = await fetch(url('/api/specs/annotate'), { method: 'POST', body: JSON.stringify({ spec: t, stage: 'nope' }) });
+    expect(bad.status).toBe(400);
+
+    // completing clears the stage; reopening to in_progress resets it to planning (no stale stage)
+    await fetch(url('/api/specs/annotate'), { method: 'POST', body: JSON.stringify({ spec: t, status: 'complete' }) });
+    spec = await specOf();
+    expect(spec.status).toBe('complete');
+    expect(spec.stage).toBeUndefined();
+    await fetch(url('/api/specs/annotate'), { method: 'POST', body: JSON.stringify({ spec: t, status: 'in_progress' }) });
+    expect((await specOf()).stage).toBe('planning');
+  });
+
   it('exports and imports the PRD as herbert.json', async () => {
     await fetch(url('/api/prd'), { method: 'POST', body: JSON.stringify({ component: 'mcp', md: '- six tools' }) });
     const res = await fetch(url('/api/prd/export'));

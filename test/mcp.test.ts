@@ -115,6 +115,21 @@ describe('MCP tools', () => {
     expect(spec.context).toBe('session page');
   });
 
+  it('logs a specification directly at an in_progress status with a stage', async () => {
+    const logged = await callTool('log_specification', {
+      summary: 'Wire up the widget',
+      status: 'in_progress',
+      stage: 'implementing',
+    });
+    expect(logged.isError).toBeUndefined();
+
+    const data = await callTool('get_session_data', { scope: 'all' });
+    const parsed = JSON.parse(data.content[0].text);
+    const spec = parsed.specifications.find((s: any) => s.summary === 'Wire up the widget');
+    expect(spec.status).toBe('in_progress');
+    expect(spec.stage).toBe('implementing');
+  });
+
   it('attributes events to the session id from the environment', async () => {
     process.env.CLAUDE_CODE_SESSION_ID = 'env-sess';
     try {

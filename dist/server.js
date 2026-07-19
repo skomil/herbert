@@ -4,7 +4,7 @@ import { MAX_SUMMARY_CHARS, VERSION, dataDir, host, port } from './config.js';
 import { dashboardHtml } from './dashboard.js';
 import { isHerbertUp } from './ensure.js';
 import { parseLogs, parseMetrics } from './otlp.js';
-import { SPEC_FEEDBACK, SPEC_STATUSES, Store, reportWindows, validateSummary, } from './store.js';
+import { SPEC_FEEDBACK, SPEC_STAGES, SPEC_STATUSES, Store, reportWindows, validateSummary, } from './store.js';
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 const EVENT_TYPES = ['specification', 'correction', 'retro'];
 const MAX_PRD_CHARS = 50_000;
@@ -273,15 +273,26 @@ export function startServer(p = port(), dir = dataDir()) {
                         sessionId = session?.sessionId ?? null;
                         repo ??= session?.cwd ?? null;
                     }
-                    if (body.status !== undefined && (body.status !== 'proposed' || body.type !== 'specification')) {
-                        return json(res, 400, { error: "status may only be 'proposed', on specifications" });
+                    if (body.status !== undefined) {
+                        if (body.type !== 'specification' || !SPEC_STATUSES.includes(body.status)) {
+                            return json(res, 400, {
+                                error: `status must be one of: ${SPEC_STATUSES.join(', ')}, on specifications`,
+                            });
+                        }
+                        if (body.stage !== undefined && !SPEC_STAGES.includes(body.stage)) {
+                            return json(res, 400, { error: `stage must be one of: ${SPEC_STAGES.join(', ')}` });
+                        }
                     }
                     // an explicit past timestamp is allowed so history backfills keep an honest timeline
                     const t = Number.isFinite(body.t) && body.t > 0 && body.t <= Date.now() ? body.t : Date.now();
                     const event = { type: body.type, sessionId, repo, summary: body.summary, ...sections, t };
                     store.addEvent(event);
-                    if (body.status === 'proposed')
-                        store.annotateSpec(t, { status: 'proposed' });
+                    // 'complete' is the implicit default (no annotation needed); any other status is recorded,
+                    // and a stage only rides along when the spec is logged in_progress
+                    if (body.status && body.status !== 'complete') {
+                        const stage = body.status === 'in_progress' && body.stage ? body.stage : undefined;
+                        store.annotateSpec(t, { status: body.status, ...(stage ? { stage } : {}) });
+                    }
                     return json(res, 200, { ok: true, event });
                 }
                 case 'POST /api/specs/feedback': {
@@ -345,6 +356,15 @@ export function startServer(p = port(), dir = dataDir()) {
                             ann.revision = null;
                         }
                     }
+                    if (body.stage !== undefined) {
+                        if (body.stage !== '' && body.stage !== null && !SPEC_STAGES.includes(body.stage)) {
+                            return json(res, 400, { error: `stage must be one of: ${SPEC_STAGES.join(', ')}` });
+                        }
+                        ann.stage = body.stage || null;
+                    }
+                    // a spec that isn't in_progress carries no stage — keep stored state matching what the card shows
+                    if (ann.status !== undefined && ann.status !== 'in_progress')
+                        ann.stage = null;
                     if (body.context !== undefined) {
                         if (typeof body.context !== 'string' || body.context.length > MAX_SUMMARY_CHARS) {
                             return json(res, 400, { error: `context must be a string under ${MAX_SUMMARY_CHARS + 1} characters` });

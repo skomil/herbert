@@ -356,6 +356,19 @@ describe('Store', () => {
     expect(store.summary().specifications[0].status).toBe('complete');
   });
 
+  it('surfaces a stage only while in_progress (default planning), never mismatching status', () => {
+    const dir = tmpDir();
+    const store = new Store(dir);
+    store.addEvent({ type: 'specification', sessionId: 's1', summary: 'stage spec', t: 3000 });
+    expect(store.summary().specifications[0].stage).toBeUndefined(); // complete -> no stage
+    store.annotateSpec(3000, { status: 'in_progress' });
+    expect(store.summary().specifications[0].stage).toBe('planning'); // defaults on entering in_progress
+    store.annotateSpec(3000, { stage: 'verifying' });
+    expect(new Store(dir).summary().specifications[0].stage).toBe('verifying'); // sticks and survives reload
+    store.annotateSpec(3000, { status: 'complete' });
+    expect(store.summary().specifications[0].stage).toBeUndefined(); // hidden once no longer in_progress
+  });
+
   it('annotates specs with an evolving component and deps', () => {
     const dir = tmpDir();
     const store = new Store(dir);

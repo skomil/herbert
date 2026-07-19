@@ -37,6 +37,17 @@ export const TOOLS = [
         description:
           "Short label for the part of the system the specification concerns, shown before it on the dashboard — e.g. 'session page' or 'MCP server'.",
       },
+      status: {
+        type: 'string',
+        enum: ['proposed', 'ready', 'in_progress', 'complete'],
+        description:
+          "Kanban status to log the spec at. Omit for 'complete' (something just built). Use 'in_progress' for a spec you're actively working now, 'ready' for triaged-but-not-started, 'proposed' for a not-yet-implemented idea.",
+      },
+      stage: {
+        type: 'string',
+        enum: ['planning', 'implementing', 'verifying'],
+        description: "Sub-stage of an in_progress spec (defaults to 'planning'); ignored unless status is 'in_progress'.",
+      },
     }),
   },
   {
@@ -242,7 +253,11 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
   }
   switch (name) {
     case 'log_specification':
-      return postEvent('specification', args.summary, { context: args.context });
+      return postEvent('specification', args.summary, {
+        context: args.context,
+        status: args.status,
+        stage: args.stage,
+      });
     case 'log_correction':
       return postEvent('correction', args.summary);
     case 'save_retro':

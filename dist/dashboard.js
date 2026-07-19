@@ -146,6 +146,10 @@ export function dashboardHtml() {
   .kctx { font-size: 11px; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 3px; }
   .ksum { font-size: 13px; color: var(--ink-1); line-height: 1.35; }
   .krev { font-size: 11px; color: var(--s3); margin-top: 4px; }
+  .kstage { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .spill { font-size: 10px; padding: 1px 7px; border: 1px solid var(--border); border-radius: 999px; cursor: pointer; color: var(--ink-muted); text-transform: capitalize; }
+  .spill:hover { border-color: var(--baseline); }
+  .spill.active { background: var(--s1); color: var(--page); border-color: var(--s1); font-weight: 600; }
   .kcard input.sann { width: 100%; box-sizing: border-box; margin-top: 6px; font-size: 11px; }
   .kempty { font-size: 12px; color: var(--ink-muted); text-align: center; padding: 8px 0; }
   @media (max-width: 640px) {
@@ -264,6 +268,14 @@ document.addEventListener('click', (e) => {
     fetch(new URL('api/specs/annotate', document.baseURI), {
       method: 'POST',
       body: JSON.stringify({ spec: Number(rm.dataset.removeSpec), deleted: true }),
+    }).then(refresh);
+    return;
+  }
+  const stg = e.target.closest('[data-stage-spec]');
+  if (stg) {
+    fetch(new URL('api/specs/annotate', document.baseURI), {
+      method: 'POST',
+      body: JSON.stringify({ spec: Number(stg.dataset.stageSpec), stage: stg.dataset.stage }),
     }).then(refresh);
     return;
   }
@@ -981,10 +993,19 @@ const KANBAN_LANES = [
   { key: 'complete', label: 'Complete' },
 ];
 
+// in_progress sub-stages, advanced by clicking the pill on a card
+const KANBAN_STAGES = ['planning', 'implementing', 'verifying'];
 function kanbanCard(e) {
+  const stageRow = e.status === 'in_progress'
+    ? '<div class="kstage">' + KANBAN_STAGES.map((st) =>
+        '<span class="spill' + (e.stage === st ? ' active' : '') +
+        '" data-stage-spec="' + e.t + '" data-stage="' + st + '">' + st + '</span>').join('') +
+      '</div>'
+    : '';
   return '<div class="kcard" draggable="true" data-kcard="' + e.t + '">' +
     (e.context ? '<div class="kctx">' + esc(e.context) + '</div>' : '') +
     '<div class="ksum">' + esc(e.summary) + '</div>' +
+    stageRow +
     (e.revision ? '<div class="krev">Pending revision: ' + esc(e.revision) + '</div>' : '') +
     '<input class="sann" data-spec="' + e.t + '" data-ann="revision" placeholder="revision (reopens spec)" value="' + esc(e.revision || '') + '">' +
     '</div>';

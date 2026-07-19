@@ -17,6 +17,13 @@ export const SPEC_FEEDBACK = [
  * what a revision reopens a spec to.
  */
 export const SPEC_STATUSES = ['proposed', 'ready', 'in_progress', 'complete'];
+/**
+ * Sub-stage of an in_progress spec, shown on its Kanban card. Only meaningful
+ * while status is 'in_progress': such a spec always resolves to one (default
+ * 'planning'), and a spec in any other status never carries a stage — so a
+ * card's stage can never mismatch its status.
+ */
+export const SPEC_STAGES = ['planning', 'implementing', 'verifying'];
 const EVENTS_FILE = 'events.jsonl';
 const SESSIONS_FILE = 'sessions.jsonl';
 const OTEL_FILE = 'otel.jsonl';
@@ -265,6 +272,9 @@ export class Store {
             out.summary = a.summary; // proposed specs are editable in place
         if (a?.revision)
             out.revision = a.revision;
+        // stage is a sub-state of in_progress only; emitting it solely here keeps it from ever mismatching the status
+        if (out.status === 'in_progress')
+            out.stage = a?.stage ?? 'planning';
         return out;
     }
     /** Live specifications (annotations applied, soft-deleted excluded), for export; optionally scoped to one repo. */
@@ -351,6 +361,12 @@ export class Store {
                 cur.status = a.status;
             else
                 delete cur.status;
+        }
+        if (a.stage !== undefined) {
+            if (a.stage)
+                cur.stage = a.stage;
+            else
+                delete cur.stage;
         }
         if (a.summary !== undefined) {
             if (a.summary)
